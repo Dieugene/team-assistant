@@ -41,44 +41,76 @@
 
 ### 2.1 Схема системы
 
+```mermaid
+flowchart TB
+    subgraph Users["Пользователи"]
+        User1["User A"]
+        User2["User B"]
+    end
+
+    subgraph AppLayer["Прикладной уровень"]
+        direction TB
+        DA["DialogueAgent<br/>Диалоги с пользователями"]
+        PL["ProcessingLayer<br/>Массив Processing Agents"]
+        CA["ContextAgent<br/>Big picture + контексты"]
+    end
+
+    subgraph Tools["Инструменты разработки"]
+        SIM["SIM<br/>Генератор тестовых данных"]
+        VSUI["VS UI<br/>Визуализация (polling)"]
+    end
+
+    EB["Event Bus<br/>Шина событий"]
+    ST["Storage<br/>Персистентное хранение"]
+
+    %% Connections
+    User1 -->|messages| DA
+    User2 -->|messages| DA
+    DA -->|raw| EB
+    PL <|---|all events| EB
+    PL -->|processed, notif| EB
+    CA <|---|notif| EB
+    CA -->|invoke| DA
+    SIM -->|invoke| DA
+    VSUI <|---|polling| ST
+
+    %% Storage integration
+    EB <-->|persist| ST
+
+    %% Styling
+    classDef appLayer fill:#e1f5ff,stroke:#01579b,stroke-width:2px
+    classDef infra fill:#f3e5f5,stroke:#4a148c,stroke-width:2px
+    classDef tools fill:#fff3e0,stroke:#e65100,stroke-width:2px
+    classDef bus fill:#ffebee,stroke:#b71c1c,stroke-width:2px
+
+    class DA,PL,CA appLayer
+    class ST infra
+    class SIM,VSUI tools
+    class EB bus
 ```
-┌─────────────────────────────────────────────────────────────────┐
-│                     Core Process (один процесс)                 │
-│                                                                  │
-│  ┌────────────────────────────────────────────────────────────┐ │
-│  │                    Event Bus                              │ │
-│  │              (in-memory pub/sub + persistence)             │ │
-│  │                                                              │ │
-│  │  ┌──────────────────┐        ┌──────────────────┐          │ │
-│  │  │ DialogueAgent    │        │ ProcessingAgent  │          │ │
-│  │  │ (publishes       │◄───────┤ (subscribes to   │          │ │
-│  │  │  dialogue_fragment/raw)│  │  raw)            │          │ │
-│  │  └──────────────────┘        └──────────────────┘          │ │
-│  │                                                              │ │
-│  │  ┌──────────────┐        ┌──────────────┐        ┌─────────┐│ │
-│  │  │Processing    │───────►│ Event Bus    │───────►│Context  ││ │
-│  │  │Agent         │(notif.) │(notification)│        │Agent    ││ │
-│  │  └──────────────┘        └──────────────┘        └─────────┘│ │
-│  │                                                         │     │ │
-│  │                              ┌──────────────────────────┘     │ │
-│  │                              │ invoke(user_id, message)     │ │
-│  │                              ▼                             │ │
-│  │                        ┌──────────────┐                    │ │
-│  │                        │ DialogueAgent│                    │ │
-│  │                        └──────────────┘                    │ │
-│  └────────────────────────────────────────────────────────────┘ │
-│                           ↕                                     │
-│  ┌────────────────────────────────────────────────────────────┐ │
-│  │                     Storage                               │ │
-│  │  (инфраструктурный слой: messages, events, state)         │ │
-│  └────────────────────────────────────────────────────────────┘ │
-└─────────────────────────────────────────────────────────────────┘
-           ↑                              ↑
-    ┌──────────────┐              ┌──────────────┐
-    │     SIM      │              │    VS UI     │
-    │  (Generator) │              │   (polling)  │
-    └──────────────┘              └──────────────┘
-```
+
+#### Описание компонентов
+
+**DialogueAgent:**
+- Принимает сообщения от пользователей и формирует ответы
+- Инициирует диалог сам (по задачам от системы, через ContextAgent.invoke)
+- Сигнализирует о завершении диалога (по сообщению или таймауту)
+- Публикует фрагменты диалогов в Event Bus с пометкой `raw`
+
+**ProcessingLayer:**
+- Содержит массив Processing Agents с общим интерфейсом
+- Наблюдает за всеми событиями в Event Bus
+- Публикует результаты: `processed` (для других агентов) или `notification` (для пользователей)
+
+**ContextAgent:**
+- Отвечает за big picture в целом для группы
+- Управляет частными контекстами, привязанными к пользователям
+- Подписан на `notification` события
+- Принимает решение о доставке через DialogueAgent.invoke
+
+**Event Bus:**
+- In-memory pub/sub с персистентностью в Storage
+- Топики: `raw`, `processed`, `notification`
 
 ### 2.2 Уровни абстракции
 
@@ -128,20 +160,10 @@
   - Обновляет состояние буфера диалога для следующей сессии
 - Возвращает список диалогов, превышающих таймаут
 
-**3. Явная отсечка**
-- Пользовательский маркер (например, "всё, спасибо")
-- Агент фиксирует фрагмент диалога
-- Публикует в Event Bus с пометкой `raw`
-
-**Механика отсечки:**
-- Фрагмент диалога содержит набор сообщений (user + assistant)
-- При срабатывании отсечки фрагмент публикуется в шину данных
-- Пометка `raw` означает "сырые данные для обработки"
-- Фрагмент может быть расширен в будущем (документы и др.)
-
 #### 3.1.2 ContextAgent
 
-**Назначение:** Агgregate и фильтрация уведомлений от ProcessingAgents, инициация диалогов.
+**Назначение:** отвечает за big picture в целом для группы, а также более частные контексты, привязанные к пользователям.
+принимает сообщения из шины данных, и решает, что и как отправлять пользователю, используя DialogueAgent.
 
 **Поток:**
 ```
@@ -155,27 +177,13 @@ ProcessingAgent → Event Bus: notification (желание что-то сооб
     → ContextAgent вызывает DialogueAgent.invoke(user_id, message)
 ```
 
-**Почему ContextAgent, а не NotifyAgent:**
-- Задача шире чем просто "уведомить"
-- Агрегация информации из разных источников
-- Принятие решения на основе широкого контекста
-- Может заглянуть в историю диалога, другие сообщения
-- Формулировка сообщения пользователю
-
-**Проверка дубликатов — сложная LLM-операция:**
-- Выполняется ContextAgent при принятии решения
-- Анализ суммарного контекста:
-  - История предыдущих уведомлений этому пользователю
-  - История диалога с этим пользователем
-  - Все текущие notification события
-- LLM решает: что дубликат / что частичное дублирование / что новая информация
-- Контекстный анализ, а не изолированная проверка
-
 ---
 
 ### 3.2 Processing Agents (подключаемые модули)
 
-**Назначение:** Обработка данных из Event Bus, управление сущностями, публикация желаний уведомить.
+**Назначение:** Обработка данных из Event Bus, публикация результатов обработки: "processed" 
+(для результатов, предназначенных для использования другими агентами) или "notification" - уведомления, 
+предназначенные для донесения до пользователей.
 
 **Архитектурные принципы:**
 - **Подключаемые через интерфейс** — единый контракт для всех агентов
@@ -187,17 +195,6 @@ ProcessingAgent → Event Bus: notification (желание что-то сооб
 - `start() / stop()` — lifecycle методы
 - `process(message, context) -> ProcessingResult` — обработка события
 - `get_state() / save_state()` — управление состоянием (опционально)
-
-**ProcessingResult содержит:**
-- `entities` — извлеченные/обновленные сущности
-- `notifications` — желания уведомить (агент сам помечает recipients)
-- `reasoning` — reasoning trace (хранится в conversation)
-
-**Публикация в Event Bus:**
-- ProcessingAgent публикует события с пометкой `notification`
-- Это "желание уведомить" на основе узкого контекста агента
-- ContextAgent видит все такие желания и принимает финальное решение
-- ContextAgent может: проигнорировать, объединить, переформулировать
 
 **Примеры агентов:**
 
@@ -226,7 +223,7 @@ ProcessingAgent → Event Bus: notification (желание что-то сооб
 **Реализация:**
 - In-memory pub/sub (EventEmitter pattern)
 - Персистентность в Storage (все события сохраняются)
-- Топики: `raw`, `processed`
+- Топики: `raw`, `processed`, `notification`
 
 **Интерфейс:**
 
@@ -246,7 +243,6 @@ class IEventBus(ABC):
 
 **Соотношение с Storage:**
 - Event Bus — коммуникация между модулями
-- Storage — персистентность
 - Event Bus использует Storage для сохранения событий
 
 ---
@@ -266,10 +262,7 @@ class IEventBus(ABC):
 | `messages` | Сообщения пользователей (диалоги) |
 | `events` | События из Event Bus (для VS UI и replay) |
 | `agent_conversations` | Истории диалогов processing agents (SGR) |
-| `agent_states` | Состояния processing agents |
-| `tasks` | Задачи (TaskManager) |
-| `user_contexts` | Контексты пользователей (роль, фокус, интересы) |
-| `notifications_log` | Лог доставленных уведомлений |
+| `agent_data` | Рабочие данные для processing agents (например, `tasks`, `notes`) |
 
 **Dev/Prod:**
 - Dev: SQLite (файл, ноль деплоя, JSON поддержка)
@@ -442,11 +435,6 @@ class LLMProviderWithRetry:
 - **Симуляция** — обязательно для тестов без реальных пользователей
 - **LLM costs** — кэширование там где возможно
 
-### 7.3 Regulatory
-
-- **Продакшен БД:** Должна соответствовать рос. законодательству (YDB и др.)
-- **Data residency:** Учет требований к хранению данных
-
 ---
 
 ## 8. Потоки данных
@@ -458,7 +446,7 @@ User → DialogueAgent
     → Storage: сообщения
     → [отсечка] → EventBus (raw: фрагмент диалога)
     → ProcessingAgent
-    → EventBus (processed) → Storage
+    → EventBus (processed, notification) → Storage
 ```
 
 ### 8.2 От системы к пользователю (уведомления)
@@ -470,16 +458,6 @@ EventBus (raw/processed) → ProcessingAgent
     → ContextAgent
     → [принимает решение на основе широкого контекста]
     → DialogueAgent → User-B
-```
-
-### 8.3 Между пользователями
-
-```
-User-A → DialogueAgent → EventBus (raw: фрагмент диалога)
-    → ProcessingAgent (TaskManager)
-    → [нужно уведомить User-B]
-    → EventBus (notification)
-    → ContextAgent → DialogueAgent → User-B
 ```
 
 ---
@@ -507,12 +485,7 @@ class IEventBus(ABC): ...
 class IProcessingAgent(ABC): ...
 class ILLMProvider(ABC): ...
 
-# Dev-реализации
-SQLiteStorage()
-InMemoryEventBus()
 
-# Prod-реализации (будет)
-YDBStorage()
 ```
 
 ### 9.4 Интерфейсы для расширения
@@ -525,27 +498,3 @@ YDBStorage()
 
 ---
 
-## 10. Открытые вопросы
-
-| Вопрос | Статус |
-|--------|--------|
-| Детальная архитектура VS UI | См. `visualization.md` |
-| Выбор БД для продакшена | ADR позже |
-| Фронтенд-стек для VS | См. `visualization.md` |
-| DI-контейнер детализация | Tech Lead |
-| Конкретные Processing Agents | Отдельная ветка разработки после рамочной системы |
-
----
-
-## 11. Следующие шаги
-
-1. ✅ Архитектура зафиксирована (этот документ)
-2. ✅ Визуализация — отдельный документ (`visualization.md`)
-3. → **Tech Lead:** Создать `implementation_plan.md`, `backlog.md`, task briefs
-4. → **ADR:** Выбор БД для продакшена (когда станет актуально)
-
----
-
-**Документ:** `00_docs/architecture/overview.md`
-**Архитектор:** Architect Agent (Sonnet 4.5)
-**Дата:** 2025-01-24
