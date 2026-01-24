@@ -94,201 +94,61 @@
 
 **Назначение:** AI-ассистент для каждого пользователя, который ведет диалог и доставляет уведомления.
 
-#### 3.1.1 DialogueAgent
+#### 3.1.1 Архитектурные решения
 
-**Точки активации:**
-1. **По сообщению пользователя** — `on_message(user_id, message)`
-2. **По таймауту** — фоновый процесс проверяет неактивные диалоги
-3. **По событию из Event Bus** — реакция на события для proactive коммуникации
+**Единый или множество инстансов:**
+- **Один инстанс DialogueAgent** управляет всеми диалогами одновременно
+- Каждый диалог идентифицируется по `user_id`
+- Агент хранит состояние активных диалогов в памяти
 
-**Архитектура:**
+**Точки активации агента:**
+1. **Входящее сообщение от пользователя** — основной триггер
+2. **Таймаут диалога** — отдельный механизм проверяет неактивные диалоги
+3. **События из Event Bus** — proactive коммуникация (например, уведомления)
 
-```python
-class DialogueAgent:
-    """
-    AI-ассистент для ведения диалога с пользователем.
-    Управляет множеством диалогов одновременно.
-    """
+**Кто работает с Event Bus:**
+- DialogueAgent подписывается на Event Bus для получения событий
+- DialogueAgent публикует завершенные диалоги в Event Bus для обработки
+- Отдельный адаптер или сам агент — вопрос реализации
 
-    def __init__(self):
-        self.active_dialogues: dict[str, DialogueState] = {}  # user_id -> состояние
-        self.dialogue_policy: DialoguePolicy = ...  # Единая политика (см. ниже)
-        self.timeout_checker = BackgroundTask(...)  # Фоновая проверка таймаутов
+**Детекция завершения диалога:**
+- Явный маркер в сообщении пользователя
+- Таймаут (пауза между сообщениями)
+- Другие условия (лимит сообщений и т.д.)
 
-    async def start(self):
-        """Запуск агента: загрузка активных диалогов"""
-        self.active_dialogues = await self.load_active_dialogues()
-        self.timeout_checker.start(self.check_timeouts, interval=60s)
+**Кто проверяет таймауты:**
+- **Вариант A:** Внутри DialogueAgent (фоновый процесс)
+- **Вариант B:** Внешний scheduler вызывает метод агента
+- **Решение:** На усмотрение Tech Lead
 
-    async def on_message(self, user_id: str, message: str):
-        """Обработка входящего сообщения"""
-        # 1. Загрузка/обновление состояния диалога
-        dialogue = self.get_or_create_dialogue(user_id)
-        dialogue.last_activity = datetime.now()
+#### 3.1.2 Диалоговая политика
 
-        # 2. Трекинг для VS UI
-        await self.events.track('message_received', {
-            'user_id': user_id,
-            'content': message
-        })
+Единая политика для Dialogue и Notify Agents определяет:
+- Стиль коммуникации (формат описывается отдельно, не хардкод)
+- Уровень детализации ответов
+- Правила поведения
+- Контекст пользователя (роль, текущий фокус)
 
-        # 3. Генерация ответа через LLM
-        user_context = await self.load_user_context(user_id)
-        response = await self.llm.generate_response(
-            dialogue_policy=self.dialogue_policy,
-            user_context=user_context,
-            message=message,
-            dialogue_history=dialogue.history
-        )
+Политика загружается из Storage и применяется при генерации ответов.
 
-        # 4. Отправка ответа пользователю
-        await self.send_to_user(user_id, response)
+#### 3.1.3 Notify Agent
 
-        # 5. Трекинг ответа для VS UI
-        await self.events.track('message_sent', {
-            'user_id': user_id,
-            'content': response
-        })
+**Соотношение с DialogueAgent:**
+- Использует ту же диалоговую политику
+- Может инициировать диалог proactive (например, для доставки уведомления)
+- Или доставлять уведомления в рамках существующего диалога
 
-        # 6. Сохранение в историю
-        dialogue.history.append((message, response))
-        await self.storage.save_message(user_id, message, response)
-
-        # 7. Проверка завершения диалога
-        if self.check_dialogue_complete(dialogue):
-            await self.package_dialogue(user_id, dialogue)
-
-    async def check_timeouts(self):
-        """Фоновая проверка таймаутов (вызывается periodic task)"""
-        now = datetime.now()
-        for user_id, dialogue in self.active_dialogues.items():
-            if now - dialogue.last_activity > DIALOGUE_TIMEOUT:
-                await self.package_dialogue(user_id, dialogue, reason='timeout')
-
-    async def on_bus_event(self, event: BusMessage):
-        """Реакция на события из Event Bus для proactive коммуникации"""
-        # Пример: ProcessingAgent обнаружил критический срок
-        # → NotifyAgent инициирует диалог с пользователем
-        if event.type == 'deadline_alert':
-            user_id = event.user_id
-            await self.initiate_dialogue(user_id, event.data)
-
-    def check_dialogue_complete(self, dialogue: DialogueState) -> bool:
-        """Проверка условий завершения диалога"""
-        # Явный маркер в последнем сообщении
-        if dialogue.has_explicit_closing_marker():
-            return True
-        # Достигнут лимит сообщений
-        if dialogue.message_count > MAX_MESSAGES:
-            return True
-        return False
-
-    async def package_dialogue(self, user_id: str, dialogue: DialogueState, reason: str = 'complete'):
-        """Упаковка завершенного диалога в Event Bus"""
-        event = {
-            "type": "dialogue_boundary",
-            "user_id": user_id,
-            "reason": reason,
-            "messages": dialogue.history,
-            "timestamp": datetime.now()
-        }
-        await self.event_bus.publish('raw', event)
-        del self.active_dialogues[user_id]  # Удаляем из активных
+**Поток уведомлений:**
 ```
-
-**Состояние диалога (DialogueState):**
-```python
-class DialogueState:
-    user_id: str
-    history: list[tuple[str, str]]  # [(user_msg, assistant_response), ...]
-    last_activity: datetime
-    started_at: datetime
-    metadata: dict  # Доп. данные диалога
-```
-
-**Диалоговая политика (DialoguePolicy):**
-```python
-class DialoguePolicy:
-    """Единая политика для Dialogue и Notify Agents"""
-    communication_style: Literal['formal', 'informal', 'neutral']
-    detail_level: Literal['concise', 'normal', 'detailed']
-    behavior_rules: dict  # Когда переспрашивать, когда уточнять
-    # Загружается из UserContext (см. Storage)
-```
-
-#### 3.1.2 NotifyAgent
-
-**Назначение:** Доставка уведомлений от Processing Agents пользователям через диалог.
-
-```python
-class NotifyAgent:
-    """
-    Использует ту же диалоговую политику, что и DialogueAgent.
-    Инициирует диалог proactive или доставляет в рамках существующего.
-    """
-    dialogue_policy: DialoguePolicy  # Общая с DialogueAgent
-    delivery_queue: dict[str, list[Notification]]  # user_id -> накопленные уведомления
-
-    async def on_processing_notification(self, notification: Notification):
-        """Обработка уведомления от ProcessingAgent"""
-        # 1. Проверка дубликатов через notifications_log в Storage
-        if await self.is_duplicate(notification):
-            return
-
-        # 2. Трекинг генерации уведомления
-        await self.events.track('notification_generated', {
-            'from_agent': notification.source_agent,
-            'to_user': notification.recipient_id,
-            'content': notification.content
-        })
-
-        # 3. Добавление в очередь доставки
-        self.delivery_queue[notification.recipient_id].append(notification)
-
-        # 4. Если есть активный диалог с пользователем — доставляем сразу
-        if notification.recipient_id in dialogue_agent.active_dialogues:
-            await self.deliver_through_dialogue(notification)
-        # Иначе — инициируем новый диалог или ждем следующего сообщения
-        else:
-            await self.initiate_delivery_dialogue(notification.recipient_id)
-
-    async def deliver_through_dialogue(self, notification: Notification):
-        """Доставка в рамках активного диалога"""
-        user_id = notification.recipient_id
-
-        # Формируем сообщение с учетом диалоговой политики
-        user_context = await self.load_user_context(user_id)
-        message = self.format_notification(notification, user_context, self.dialogue_policy)
-
-        # Отправляем как если бы это был ответ ассистента
-        await dialogue_agent.send_to_user(user_id, message)
-
-        # Трекинг доставки
-        await self.events.track('notification_sent', {
-            'from_agent': notification.source_agent,
-            'to_user': user_id,
-            'content': notification.content
-        })
-
-        # Логируем доставку для проверки дубликатов
-        await self.storage.save_notification_log(notification)
+ProcessingAgent → Event Bus (notification_generated)
+    → NotifyAgent получает
+    → Проверяет дубликаты
+    → Доставляет через DialogueAgent
 ```
 
 **Проверка дубликатов:**
-```python
-async def is_duplicate(self, notification: Notification) -> bool:
-    """Проверка по notifications_log в Storage"""
-    recent_logs = await self.storage.get_notifications_log(
-        user_id=notification.recipient_id,
-        since=datetime.now() - timedelta(hours=24)
-    )
-    # Дубликат если: тот же source_agent + похожий контент + было доставлено недавно
-    return any(
-        log.source_agent == notification.source_agent and
-        self.similarity(log.content, notification.content) > 0.8
-        for log in recent_logs
-    )
-```
+- По логу доставленных уведомлений в Storage
+- Критерии: тот же источник + похожий контент + недавняя доставка
 
 ---
 
@@ -302,64 +162,32 @@ async def is_duplicate(self, notification: Notification) -> bool:
 - Все используют LLM (SGR Agent Core или другие подходы)
 - **Агенты сами решают** кому что доставить (помечают recipients)
 
-**Базовый интерфейс:**
+**Интерфейс:**
+- `start() / stop()` — lifecycle методы
+- `process(message, context) -> ProcessingResult` — обработка события
+- `get_state() / save_state()` — управление состоянием (опционально)
 
-```python
-class IProcessingAgent(ABC):
-    """Интерфейс для подключения обработчиков"""
-
-    id: str
-    name: str
-
-    async def start(self): ...
-    async def stop(self): ...
-
-    async def process(
-        self,
-        message: BusMessage,
-        context: ProcessingContext
-    ) -> ProcessingResult: ...
-
-    # State management (опционально, если агенту нужен персистентный state)
-    async def get_state(self) -> AgentState: ...
-    async def save_state(self, state: AgentState): ...
-
-
-class ProcessingResult(TypedDict):
-    """Результат обработки"""
-    entities: list[Entity]           # Извлеченные/обновленные сущности
-    notifications: list[Notification]  # Кому что доставить
-    reasoning: Optional[ReasoningTrace]  # Reasoning trace для VS UI
-
-
-class ReasoningTrace(TypedDict):
-    """Структурированный reasoning SGR агента"""
-    reasoning: str                   # Текстовое объяснение
-    selected_tool: str               # Выбранный tool
-    tool_arguments: dict             # Аргументы tool
-    timestamp: datetime              # Время reasoning
-```
+**ProcessingResult содержит:**
+- `entities` — извлеченные/обновленные сущности
+- `notifications` — кому что доставить (агент сам помечает recipients)
+- `reasoning` — reasoning trace для VS UI
 
 **Примеры агентов:**
 
 **TaskManager:**
 - Отслеживает задачи и сроки
 - Ведет базу задач (создание, обновление, закрытие)
-- Соотносит задачи из сообщений с существующими в базе
-- Помечает ответственных и дедлайны
 - Отправляет уведомления о приближении сроков
 
 **ContextManager:**
 - Отслеживает движение информации между пользователями
 - Определяет что из входящих данных может быть полезно конкретному пользователю
-- Помечает: "это нужно User-X в его задачах"
 - Анализирует контекст каждого пользователя (текущий фокус, роль)
 
 **Future agents:**
 - RiskDetector — выявление рисков и конфликтов
 - DependencyFinder — поиск связей между задачами
 - DeadlineWatcher — мониторинг сроков
-- (любые другие через единый интерфейс)
 
 **Развитие системы агентов:**
 - Сначала: рамочная система с интерфейсом `IProcessingAgent`
@@ -402,98 +230,36 @@ class IEventBus(ABC):
 
 ### 3.4 Storage (инфраструктурный уровень)
 
-**Назначение:** Универсальный персистентный слой для хранения всех данных системы.
+**Назначение:** Персистентное хранение всех данных системы.
 
-**Принципы:**
-- **Универсальность** — IStorage не зависит от бизнес-логики, работает с generic сущностями
-- **Абстракция через репозитории** — бизнес-модули используют Repository pattern поверх Storage
-- **State vs Memory** — см. ниже
+**Архитектурный подход:**
+- **Универсальный низкоуровневый интерфейс** — IStorage не зависит от бизнес-логики
+- **Repository pattern** — бизнес-модули используют типизированные репозитории поверх Storage
 
-**Интерфейс:**
+**Сущности:**
 
-```python
-class IStorage(ABC):
-    """Универсальный интерфейс хранения (низкоуровневый)"""
-
-    # Generic CRUD operations
-    async def save(self, entity_type: str, entity_id: str, data: dict): ...
-    async def load(self, entity_type: str, entity_id: str) -> dict | None: ...
-    async def delete(self, entity_type: str, entity_id: str): ...
-
-    # Query operations
-    async def query(self, entity_type: str, filter: Filter) -> list[dict]: ...
-    async def exists(self, entity_type: str, filter: Filter) -> bool: ...
-
-    # Transaction support
-    async def begin_transaction(self) -> Transaction: ...
-```
-
-**Репозитории (бизнес-слой):**
-
-Поверх IStorage строятся типизированные репозитории:
-
-```python
-class MessageRepository:
-    """Работа с сообщениями диалогов"""
-    def __init__(self, storage: IStorage):
-        self.storage = storage
-
-    async def save_message(self, msg: Message): ...
-    async def get_messages(self, user_id: str, limit: int) -> list[Message]: ...
-
-class TaskRepository:
-    """Работа с задачами (TaskManager)"""
-    def __init__(self, storage: IStorage):
-        self.storage = storage
-
-    async def save_task(self, task: Task): ...
-    async def get_tasks(self, filter: TaskFilter) -> list[Task]: ...
-
-class AgentStateRepository:
-    """Работа с состояниями агентов"""
-    def __init__(self, storage: IStorage):
-        self.storage = storage
-
-    async def save_state(self, agent_id: str, state: AgentState): ...
-    async def load_state(self, agent_id: str) -> AgentState | None: ...
-
-class AgentConversationRepository:
-    """Работа с SGR conversation history"""
-    def __init__(self, storage: IStorage):
-        self.storage = storage
-
-    async def save_conversation(self, agent_id: str, conv: list): ...
-    async def load_conversation(self, agent_id: str) -> list: ...
-
-class UserContextRepository:
-    """Работа с контекстами пользователей"""
-    def __init__(self, storage: IStorage):
-        self.storage = storage
-
-    async def save_context(self, user_id: str, ctx: UserContext): ...
-    async def load_context(self, user_id: str) -> UserContext: ...
-
-class NotificationLogRepository:
-    """Работа с логом доставленных уведомлений"""
-    def __init__(self, storage: IStorage):
-        self.storage = storage
-
-    async def save_log(self, notification: Notification): ...
-    async def get_recent_logs(self, user_id: str, since: datetime) -> list[Notification]: ...
-```
+| Сущность | Описание |
+|----------|----------|
+| `messages` | Сообщения пользователей (диалоги) |
+| `events` | События из Event Bus (для VS UI и replay) |
+| `agent_conversations` | Истории диалогов processing agents (SGR) |
+| `agent_states` | Состояния processing agents |
+| `tasks` | Задачи (TaskManager) |
+| `user_contexts` | Контексты пользователей (роль, фокус, интересы) |
+| `notifications_log` | Лог доставленных уведомлений |
 
 **State vs Memory:**
 
 | Понятие | Описание | Где хранится | Когда сбрасывается |
 |---------|----------|--------------|-------------------|
-| **State** | Текущее состояние объекта на момент времени (какой-то агент имеет задачу X в статусе Y) | Storage (персистентно) | При обновлении состояния |
-| **Memory** | История предыдущих состояний и действий (conversation history, message history) | Storage (персистентно) | Обычно никогда (архив) |
-| **In-memory cache** | Кэш в RAM для быстрого доступа (агент держит state в памяти во время обработки) | RAM процесса | При перезапуске процесса / сервера |
+| **State** | Текущее состояние объекта на момент времени | Storage (персистентно) | При обновлении состояния |
+| **Memory** | История предыдущих состояний и действий | Storage (персистентно) | Обычно никогда (архив) |
+| **In-memory cache** | Кэш в RAM для быстрого доступа | RAM процесса | При перезапуске процесса |
 
 **Пример для ProcessingAgent:**
-- **State:** текущий счетчик, последний обработанный timestamp, флаги (хранится в Storage через `AgentStateRepository`)
-- **Memory:** SGR conversation history — все reasoning + actions (хранится в Storage через `AgentConversationRepository`)
-- **In-memory:** кэш загруженного state + conversation для текущей сессии (в RAM агента)
+- **State:** текущий счетчик, последний обработанный timestamp, флаги
+- **Memory:** SGR conversation history (reasoning + actions)
+- **In-memory:** кэш загруженного state для текущей сессии
 
 **Dev/Prod:**
 - Dev: SQLite (файл, ноль деплоя, JSON поддержка)
@@ -558,89 +324,37 @@ SIM Engine → DialogueAgent.on_message() → ... → Event Bus (raw) → Proces
 **Event Bus (транспортный уровень):**
 - События для коммуникации между модулями
 - Пример: `dialogue_boundary` → сигнал для ProcessingAgents начать обработку
-- Сохраняются в Storage для replay и восстановления состояния
+- Сохраняются в Storage для replay
 
 **Event Tracking (наблюдаемость):**
 - События для визуализации в VS UI
 - Пример: `message_received`, `agent_reasoning`, `notification_sent`
-- Сохраняются в отдельном хранилище для timeline
+- Сохраняются отдельно для timeline
 
-**Пример с dialogue_boundary:**
-
-```python
-# 1. DialogueAgent публикует в Event Bus для ProcessingAgents
-await event_bus.publish('raw', {
-    "type": "dialogue_boundary",
-    "user_id": "user-1",
-    "reason": "timeout",
-    "messages": [...]
-})
-
-# 2. Это же событие сохраняется в Storage для history (автоматически Event Bus)
-# 3. Для VS UI трекаются отдельные события из диалога:
-await events.track('message_received', {'user_id': 'user-1', 'content': '...'})
-await events.track('message_sent', {'user_id': 'user-1', 'content': '...'})
-# 4. Когда диалог завершен — трекается boundary для timeline
-await events.track('dialogue_boundary_complete', {'user_id': 'user-1', 'reason': 'timeout'})
-```
+**Разница на примере dialogue_boundary:**
+- Event Bus: сигнал для ProcessingAgents (содержит сообщения)
+- Tracking: событие для timeline (содержит reason, user_id)
 
 ### 4.2 Гибридный подход VS DataSource
 
-**Прямой трекинг** (для событий, которых нет в основном storage):
-```python
-await events.track('agent_reasoning', {...})      # Reasoning агента
-await events.track('dialogue_boundary_complete', {...})  # Завершение диалога
-await events.track('notification_generated', {...})     # Генерация уведомления
-```
+**Прямой трекинг** — для событий, которых нет в основном storage:
+- `agent_reasoning`
+- `notification_generated`
+- `dialogue_boundary_complete`
 
-**Извлечение из storage** (для основных данных):
-```python
-class VSDataSource:
-    async def get_timeline(self, filter):
-        # Прямой трекинг
-        tracked = await self.tracking_storage.get_events(filter)
-
-        # Извлечение из основного storage
-        extracted = []
-        # Сообщения → конвертируем в timeline events
-        messages = await self.message_repo.get_messages(filter)
-        for msg in messages:
-            extracted.append(self._message_to_timeline_event(msg))
-
-        # События Event Bus → добавляем в timeline
-        bus_events = await self.event_bus.get_history('raw', filter)
-        for event in bus_events:
-            extracted.append(self._bus_event_to_timeline_event(event))
-
-        return self.merge(tracked, extracted)
-```
+**Извлечение из storage** — для основных данных:
+- Messages → конвертируем в timeline events
+- Event Bus events → добавляем в timeline
 
 ### 4.3 Event Tracker
 
-Аналог Amplitude SDK:
-```python
-class EventTracker:
-    async def track(self, event_name: str, data: dict):
-        """Фиксирует событие для визуализации"""
-        event = TimelineEvent(
-            timestamp=datetime.now(),
-            type=event_name,
-            data=data
-        )
-        await self.storage.save_event(event)
-```
+Аналог Amplitude SDK — фиксирует события для визуализации.
 
-**Основные события для трекинга:**
-
-| Событие | Когда трекается | Данные |
-|---------|-----------------|--------|
-| `message_received` | Пользователь отправил сообщение | user_id, content |
-| `message_sent` | Ассистент отправил ответ | user_id, content |
-| `dialogue_boundary_complete` | Диалог завершен | user_id, reason, message_count |
-| `agent_reasoning` | Reasoning phase завершена | agent_id, reasoning (структура) |
-| `agent_action` | Action phase выполнена | agent_id, tool, result |
-| `notification_generated` | Агент решил уведомить | from_agent, to_user, content |
-| `notification_sent` | Уведомление доставлено | from_agent, to_user, content |
+**Основные события:**
+- `message_received / message_sent`
+- `dialogue_boundary_complete`
+- `agent_reasoning`
+- `notification_generated / notification_sent`
 
 ---
 
@@ -700,106 +414,22 @@ class LLMProviderWithRetry:
 2. **Select Action Phase** — выбор tool
 3. **Action Phase** — выполнение tool
 
-**Типы агентов:**
-- `SGRAgent` — полностью на Structured Output
-- `ToolCallingAgent` — нативный function calling
-- `SGRToolCallingAgent` — гибрид
-
 ### 6.2 Использование в проекте
 
 **Processing Agents на базе SGR:**
-```python
-class TaskManagerAgent(SGRToolCallingAgent):
-    """
-    Reasoning: анализ задачи через LLM
-    Action: сохранение/обновление в базе через tool
-    """
-    def __init__(self, storage: IStorage, event_tracker: EventTracker):
-        self.conv_repo = AgentConversationRepository(storage)
-        self.events = event_tracker
-
-    async def process(self, message: BusMessage, context: ProcessingContext) -> ProcessingResult:
-        # 1. SGR Reasoning Phase
-        reasoning = await self._reasoning_phase(message)
-
-        # 2. Трекинг reasoning для VS UI (сразу после получения)
-        await self.events.track('agent_reasoning', {
-            'agent_id': self.id,
-            'timestamp': datetime.now(),
-            'reasoning': reasoning
-        })
-
-        # 3. SGR Action Phase
-        action_result = await self._execute_action(reasoning.selected_tool, reasoning.tool_arguments)
-
-        # 4. Сохранение conversation в Storage (периодически или после action)
-        await self.conv_repo.save_conversation(self.id, self.conversation)
-
-        # 5. Формирование результата
-        return ProcessingResult(
-            entities=action_result.entities,
-            notifications=action_result.notifications,
-            reasoning=reasoning  # ReasoningTrace структура
-        )
-```
-
-**State vs Memory в SGR агенте:**
-
-```python
-class TaskManagerAgent(SGRToolCallingAgent):
-    # State (текущее состояние)
-    state: AgentState  # → сохраняется через AgentStateRepository
-
-    # Memory (история)
-    conversation: list  # SGR internal conversation → сохраняется через AgentConversationRepository
-
-    async def save_state(self, state: AgentState):
-        """Вызывается системой периодически или при stop()"""
-        await self.state_repo.save_state(self.id, state)
-```
+- Reasoning: анализ через LLM
+- Action: сохранение/обновление в базе через tool
+- Reasoning trace возвращается в `ProcessingResult`
 
 **Conversation storage:**
-```python
-# SGR хранит conversation в памяти: agent.conversation
-# Наш storage сохраняет для персистентности через репозиторий
-await conv_repo.save_conversation(agent.id, agent.conversation)
-```
+- SGR хранит conversation в памяти агента
+- Наш storage сохраняет для персистентности
+- Кто вызывает сохранение — на усмотрение Tech Lead (периодически, после action, при stop)
 
 **Reasoning traces для VS UI:**
-
-```python
-# Reasoning phase возвращает структуру
-{
-    "reasoning": "Анализирую задачу...",
-    "selected_tool": "save_task",
-    "tool_arguments": {...}
-}
-
-# Сохраняем для визуализации внутри process() ДО выполнения action
-await events.track('agent_reasoning', {
-    'agent_id': agent.id,
-    'timestamp': datetime.now(),
-    'reasoning': reasoning
-})
-```
-
-**Альтернатива: автоматически через SGR**
-
-```python
-# Можно настроить SGR на автоматический трекинг
-class TaskManagerAgent(SGRToolCallingAgent):
-    def __init__(self, ...):
-        super().__init__(
-            on_reasoning=self._track_reasoning,  # callback после reasoning
-            on_action=self._track_action          # callback после action
-        )
-
-    async def _track_reasoning(self, reasoning: ReasoningTrace):
-        await self.events.track('agent_reasoning', {
-            'agent_id': self.id,
-            'reasoning': reasoning
-        })
-```
+- Reasoning phase возвращает структуру
+- Сохраняется для визуализации через events.track()
+- Где вызывается — внутри process() или через callback — на усмотрение Tech Lead
 
 ---
 
@@ -829,45 +459,31 @@ class TaskManagerAgent(SGRToolCallingAgent):
 ### 8.1 От пользователя в систему
 
 ```
-User → DialogueAgent.on_message()
-    → Трекинг: message_received
-    → LLM генерация ответа
-    → Трекинг: message_sent
-    → Storage: save_message (через MessageRepository)
-    → [dialogue complete] → EventBus (raw): dialogue_boundary
-    → ProcessingAgent.process()
-    → Трекинг: agent_reasoning
-    → ProcessingAgent выполняет action
-    → EventBus (processed): entity_updated
-    → Storage: save_entity (через TaskRepository и др.)
+User → DialogueAgent
+    → Storage: сообщения
+    → [dialogue complete] → EventBus (raw)
+    → ProcessingAgent
+    → EventBus (processed) → Storage
 ```
 
 ### 8.2 От системы к пользователю (уведомления)
 
 ```
-EventBus (raw/processed) → ProcessingAgent.process()
-    → [агент решает: уведомить User-B]
-    → ProcessingResult.notifications = [...]
-    → EventBus (processed): notification_generated
-    → NotifyAgent.on_processing_notification()
-    → [проверка дубликатов через NotificationLogRepository]
-    → DialogueAgent: доставить в диалоге или инициировать новый
-    → Трекинг: notification_sent
-    → Storage: save_notification_log
+EventBus (raw/processed) → ProcessingAgent
+    → [агент решил: уведомить User-B]
+    → EventBus (processed)
+    → NotifyAgent
+    → DialogueAgent → User-B
 ```
 
-### 8.3 Между пользователями (через агента)
+### 8.3 Между пользователями
 
 ```
-User-A → DialogueAgent.on_message()
-    → EventBus (raw): dialogue_boundary
-    → ProcessingAgent (TaskManager).process()
-    → [TaskManager: извлек задачу, нужно уведомить User-B]
-    → ProcessingResult.notifications = [Notification(to_user='User-B', ...)]
-    → EventBus (processed): notification_generated
-    → NotifyAgent.on_processing_notification()
-    → DialogueAgent: доставить User-B
-    → User-B получает уведомление
+User-A → DialogueAgent → EventBus (raw)
+    → ProcessingAgent (TaskManager)
+    → [нужно уведомить User-B]
+    → EventBus (processed)
+    → NotifyAgent → DialogueAgent → User-B
 ```
 
 ---
