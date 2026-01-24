@@ -52,14 +52,20 @@
 │  │  ┌──────────────────┐        ┌──────────────────┐          │ │
 │  │  │ DialogueAgent    │        │ ProcessingAgent  │          │ │
 │  │  │ (publishes       │◄───────┤ (subscribes to   │          │ │
-│  │  │  dialogue_boundary)│      │  dialogue_boundary)│        │ │
+│  │  │  dialogue_fragment/raw)│  │  raw)            │          │ │
 │  │  └──────────────────┘        └──────────────────┘          │ │
 │  │                                                              │ │
-│  │  ┌──────────────────┐        ┌──────────────────┐          │ │
-│  │  │ ProcessingAgent  │───────►│ DialogueAgent    │          │ │
-│  │  │ (publishes       │        │ (subscribes to   │          │ │
-│  │  │  notifications)  │        │  notifications)  │          │ │
-│  │  └──────────────────┘        └──────────────────┘          │ │
+│  │  ┌──────────────┐        ┌──────────────┐        ┌─────────┐│ │
+│  │  │Processing    │───────►│ Event Bus    │───────►│Context  ││ │
+│  │  │Agent         │(notif.) │(notification)│        │Agent    ││ │
+│  │  └──────────────┘        └──────────────┘        └─────────┘│ │
+│  │                                                         │     │ │
+│  │                              ┌──────────────────────────┘     │ │
+│  │                              │ invoke(user_id, message)     │ │
+│  │                              ▼                             │ │
+│  │                        ┌──────────────┐                    │ │
+│  │                        │ DialogueAgent│                    │ │
+│  │                        └──────────────┘                    │ │
 │  └────────────────────────────────────────────────────────────┘ │
 │                           ↕                                     │
 │  ┌────────────────────────────────────────────────────────────┐ │
@@ -77,7 +83,7 @@
 ### 2.2 Уровни абстракции
 
 **Прикладной уровень:**
-- Dialogue & Notify Agents — диалоговая система
+- Dialogue & Context Agents — диалоговая система
 - Processing Agents — подключаемые модули обработки
 - SIM — генератор тестовых данных
 - VS UI — визуализация
@@ -93,9 +99,9 @@
 
 ## 3. Детальное описание модулей
 
-### 3.1 Dialogue & Notify Agents (единая диалоговая система)
+### 3.1 Dialogue & Context Agents (диалоговая система)
 
-**Назначение:** AI-ассистент для каждого пользователя, который ведет диалог и доставляет уведомления.
+**Назначение:** Ведение диалогов с пользователями, фиксация фрагментов диалогов для обработки.
 
 #### 3.1.1 DialogueAgent
 
@@ -110,61 +116,72 @@
 - Основной триггер для диалога
 - Агент генерирует ответ через LLM
 - Сохраняет сообщения в Storage
-- При завершении диалога публикует `dialogue_boundary` в Event Bus
+- Накапливает фрагмент диалога
 
 **2. Проверка таймаутов — `check_timeouts(timeout_minutes, timestamp)`**
 - Вызывается периодически внешним scheduler или внутри агента
 - Загружает истории всех активных диалогов
 - Для каждого диалога проверяет время последней коммуникации
 - Если время > `timeout_minutes`:
-  - Публикует `dialogue_boundary` с reason="timeout" в Event Bus
+  - Фиксирует фрагмент диалога
+  - Публикует в Event Bus с пометкой `raw`
   - Обновляет состояние буфера диалога для следующей сессии
 - Возвращает список диалогов, превышающих таймаут
 
-**3. Проверка Event Bus — `check_event_bus(after_timestamp)`**
-- Вызывается периодически или по триггеру
-- Читает все события из Event Bus с момента `after_timestamp`
-- Пример события от TaskManager: "У пользователя X появились задачи Y, Z"
-- Агент анализирует события и решает: какому пользователю что сообщить
-- Инициирует диалог proactive через `invoke(user_id, message)`
+**3. Явная отсечка**
+- Пользовательский маркер (например, "всё, спасибо")
+- Агент фиксирует фрагмент диалога
+- Публикует в Event Bus с пометкой `raw`
 
-#### 3.1.2 NotifyAgent
+**Механика отсечки:**
+- Фрагмент диалога содержит набор сообщений (user + assistant)
+- При срабатывании отсечки фрагмент публикуется в шину данных
+- Пометка `raw` означает "сырые данные для обработки"
+- Фрагмент может быть расширен в будущем (документы и др.)
 
-**Соотношение с DialogueAgent:**
-- NotifyAgent НЕ дублирует функциональность DialogueAgent
-- NotifyAgent — это **фильтр и роутер** уведомлений от ProcessingAgents
-- DialogueAgent — это **интерфейс к пользователю** (генерация ответов, ведение диалога)
+#### 3.1.2 ContextAgent
 
-**Поток уведомлений:**
+**Назначение:** Агgregate и фильтрация уведомлений от ProcessingAgents, инициация диалогов.
+
+**Поток:**
 ```
-ProcessingAgent → Event Bus: "уведомить User-B о X"
-    → NotifyAgent подписан на такие события
-    → NotifyAgent проверяет: не дубликат ли это? (см. ниже)
-    → NotifyAgent вызывает DialogueAgent.invoke(user_id, notification_message)
-    → DialogueAgent ведет диалог с пользователем
+ProcessingAgent → Event Bus: notification (желание что-то сообщить)
+    → ContextAgent подписан на notification события
+    → ContextAgent видит более широкую картину:
+      - Все notification события от разных ProcessingAgents
+      - История диалога с пользователем
+      - Другие события в шине
+    → ContextAgent принимает решение: что доставлять, как формулировать
+    → ContextAgent вызывает DialogueAgent.invoke(user_id, message)
 ```
+
+**Почему ContextAgent, а не NotifyAgent:**
+- Задача шире чем просто "уведомить"
+- Агрегация информации из разных источников
+- Принятие решения на основе широкого контекста
+- Может заглянуть в историю диалога, другие сообщения
+- Формулировка сообщения пользователю
 
 **Проверка дубликатов — сложная LLM-операция:**
-- Отдельные сообщения могут содержать элементы, частично упомянутые в других сообщениях
-- Что-то могло быть упомянуто ранее и уже попало в историю диалога
-- Проверка выполняется LLM на этапе инициации диалога с учетом **суммарного контекста**:
+- Выполняется ContextAgent при принятии решения
+- Анализ суммарного контекста:
   - История предыдущих уведомлений этому пользователю
   - История диалога с этим пользователем
-  - Текущее уведомление
-- LLM решает: это дубликат / частичное дублирование / новая информация
-- Не изолированная проверка двух строк, а анализ контекста
+  - Все текущие notification события
+- LLM решает: что дубликат / что частичное дублирование / что новая информация
+- Контекстный анализ, а не изолированная проверка
 
 ---
 
 ### 3.2 Processing Agents (подключаемые модули)
 
-**Назначение:** Обработка данных из Event Bus, управление сущностями, принятие решений о доставке.
+**Назначение:** Обработка данных из Event Bus, управление сущностями, публикация желаний уведомить.
 
 **Архитектурные принципы:**
 - **Подключаемые через интерфейс** — единый контракт для всех агентов
 - Каждый агент имеет свой **state** и **memory** (см. Storage раздел)
 - Все используют LLM (SGR Agent Core или другие подходы)
-- **Агенты сами решают** кому что доставить (помечают recipients)
+- **Агенты видят узкий контекст** — решают на основе того, что знают
 
 **Интерфейс:**
 - `start() / stop()` — lifecycle методы
@@ -173,20 +190,27 @@ ProcessingAgent → Event Bus: "уведомить User-B о X"
 
 **ProcessingResult содержит:**
 - `entities` — извлеченные/обновленные сущности
-- `notifications` — кому что доставить (агент сам помечает recipients)
-- `reasoning` — reasoning trace для VS UI
+- `notifications` — желания уведомить (агент сам помечает recipients)
+- `reasoning` — reasoning trace (хранится в conversation)
+
+**Публикация в Event Bus:**
+- ProcessingAgent публикует события с пометкой `notification`
+- Это "желание уведомить" на основе узкого контекста агента
+- ContextAgent видит все такие желания и принимает финальное решение
+- ContextAgent может: проигнорировать, объединить, переформулировать
 
 **Примеры агентов:**
 
 **TaskManager:**
 - Отслеживает задачи и сроки
 - Ведет базу задач (создание, обновление, закрытие)
-- Отправляет уведомления о приближении сроков
+- Публикует notification о приближении сроков
 
 **ContextManager:**
-- Отслеживает движение информации между пользователями
+- Отслеживает движение информации между пользователях
 - Определяет что из входящих данных может быть полезно конкретному пользователю
 - Анализирует контекст каждого пользователя (текущий фокус, роль)
+- Публикует notification о релевантной информации
 
 **Развитие системы агентов:**
 - Сначала: рамочная система с интерфейсом `IProcessingAgent`
@@ -221,13 +245,13 @@ class IEventBus(ABC):
 ```
 
 **Соотношение с Storage:**
-- Event Bus — транспортный уровень (коммуникация)
-- Storage — инфраструктурный уровень (персистентность)
+- Event Bus — коммуникация между модулями
+- Storage — персистентность
 - Event Bus использует Storage для сохранения событий
 
 ---
 
-### 3.4 Storage (инфраструктурный уровень)
+### 3.4 Storage
 
 **Назначение:** Персистентное хранение всех данных системы.
 
@@ -246,19 +270,6 @@ class IEventBus(ABC):
 | `tasks` | Задачи (TaskManager) |
 | `user_contexts` | Контексты пользователей (роль, фокус, интересы) |
 | `notifications_log` | Лог доставленных уведомлений |
-
-**State vs Memory:**
-
-| Понятие | Описание | Где хранится | Когда сбрасывается |
-|---------|----------|--------------|-------------------|
-| **State** | Текущее состояние объекта на момент времени | Storage (персистентно) | При обновлении состояния |
-| **Memory** | История предыдущих состояний и действий | Storage (персистентно) | Обычно никогда (архив) |
-| **In-memory cache** | Кэш в RAM для быстрого доступа | RAM процесса | При перезапуске процесса |
-
-**Пример для ProcessingAgent:**
-- **State:** текущий счетчик, последний обработанный timestamp, флаги
-- **Memory:** SGR conversation history (reasoning + actions)
-- **In-memory:** кэш загруженного state для текущей сессии
 
 **Dev/Prod:**
 - Dev: SQLite (файл, ноль деплоя, JSON поддержка)
@@ -284,21 +295,11 @@ class IEventBus(ABC):
 - ✅ "Иван из закупок сообщил об отставании поставки X на 2 недели"
 
 **Интеграция:**
-SIM работает как замена пользователя — отправляет сообщения через `DialogueAgent.on_message()`:
-
-```python
-class SimEngine:
-    async def generate_user_action(self, profile: SimProfile, scenario_event: ScenarioEvent):
-        """Генерация действия виртуального пользователя"""
-        message = self.compose_message(profile, scenario_event)
-
-        # SIM отправляет сообщение как обычный пользователь
-        await dialogue_agent.on_message(user_id=profile.user_id, message=message)
-```
+SIM вызывает `DialogueAgent.invoke(user_id, message)` как обычный пользователь.
 
 **Поток данных:**
 ```
-SIM Engine → DialogueAgent.on_message() → ... → Event Bus (raw) → ProcessingAgents
+SIM Engine → DialogueAgent.invoke() → ... → Event Bus (raw) → ProcessingAgents
 ```
 
 ---
@@ -320,30 +321,26 @@ SIM Engine → DialogueAgent.on_message() → ... → Event Bus (raw) → Proces
 
 ### 4.1 Разница между Event Bus и Tracking
 
-**Event Bus (транспортный уровень):**
+**Event Bus:**
 - События для коммуникации между модулями
-- Пример: `dialogue_boundary` → сигнал для ProcessingAgents начать обработку
+- Пример: фрагмент диалога с пометкой `raw` → для ProcessingAgents
 - Сохраняются в Storage для replay
 
 **Event Tracking (наблюдаемость):**
 - События для визуализации в VS UI
-- Пример: `message_received`, `agent_reasoning`, `notification_sent`
+- Пример: `message_received`, `notification_sent`
 - Сохраняются отдельно для timeline
-
-**Разница на примере dialogue_boundary:**
-- Event Bus: сигнал для ProcessingAgents (содержит сообщения)
-- Tracking: событие для timeline (содержит reason, user_id)
 
 ### 4.2 Гибридный подход VS DataSource
 
 **Прямой трекинг** — для событий, которых нет в основном storage:
-- `agent_reasoning`
 - `notification_generated`
-- `dialogue_boundary_complete`
+- `dialogue_fragment_published`
 
 **Извлечение из storage** — для основных данных:
 - Messages → конвертируем в timeline events
 - Event Bus events → добавляем в timeline
+- Agent conversations (agent_conversations) → reasoning traces
 
 ### 4.3 Event Tracker
 
@@ -351,8 +348,7 @@ SIM Engine → DialogueAgent.on_message() → ... → Event Bus (raw) → Proces
 
 **Основные события:**
 - `message_received / message_sent`
-- `dialogue_boundary_complete`
-- `agent_reasoning`
+- `dialogue_fragment_published`
 - `notification_generated / notification_sent`
 
 ---
@@ -460,7 +456,7 @@ class LLMProviderWithRetry:
 ```
 User → DialogueAgent
     → Storage: сообщения
-    → [dialogue complete] → EventBus (raw)
+    → [отсечка] → EventBus (raw: фрагмент диалога)
     → ProcessingAgent
     → EventBus (processed) → Storage
 ```
@@ -470,19 +466,20 @@ User → DialogueAgent
 ```
 EventBus (raw/processed) → ProcessingAgent
     → [агент решил: уведомить User-B]
-    → EventBus (processed)
-    → NotifyAgent
+    → EventBus (notification)
+    → ContextAgent
+    → [принимает решение на основе широкого контекста]
     → DialogueAgent → User-B
 ```
 
 ### 8.3 Между пользователями
 
 ```
-User-A → DialogueAgent → EventBus (raw)
+User-A → DialogueAgent → EventBus (raw: фрагмент диалога)
     → ProcessingAgent (TaskManager)
     → [нужно уведомить User-B]
-    → EventBus (processed)
-    → NotifyAgent → DialogueAgent → User-B
+    → EventBus (notification)
+    → ContextAgent → DialogueAgent → User-B
 ```
 
 ---
