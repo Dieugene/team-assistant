@@ -47,18 +47,22 @@
 │                                                                  │
 │  ┌────────────────────────────────────────────────────────────┐ │
 │  │                    Event Bus                              │ │
-│  │              (in-memory pub/sub + storage)                │ │
+│  │              (in-memory pub/sub + persistence)             │ │
 │  └────────────────────────────────────────────────────────────┘ │
 │                           ↑                                     │
-│  ┌────────────┐  ┌────────────┐  ┌──────────────────────────┐ │
-│  │  Dialogue  │  │   Notify   │  │   Processing Agents      │ │
-│  │   Agent    │  │   Agent    │   │   (подключаемые модули) │ │
-│  └────────────┘  └────────────┘  └──────────────────────────┘ │
-│        ↓               ↓                      ↓                 │
+│  ┌────────────────────────────────────────────────────────────┐ │
+│  │              Dialogue & Notify Agents                      │ │
+│  │         (единая диалоговая система)                        │ │
+│  └────────────────────────────────────────────────────────────┘ │
+│                           ↓                                     │
+│  ┌────────────────────────────────────────────────────────────┐ │
+│  │              Processing Agents                             │ │
+│  │         (подключаемые модули через интерфейс)              │ │
+│  └────────────────────────────────────────────────────────────┘ │
+│                                                                  │
 │  ┌────────────────────────────────────────────────────────────┐ │
 │  │                     Storage                               │ │
-│  │  • messages  • events  • agent_conversations             │ │
-│  │  • agent_states  • reasoning_traces                      │ │
+│  │  (инфраструктурный слой: messages, events, state)         │ │
 │  └────────────────────────────────────────────────────────────┘ │
 └─────────────────────────────────────────────────────────────────┘
            ↑                              ↑
@@ -68,95 +72,113 @@
     └──────────────┘              └──────────────┘
 ```
 
-### 2.2 Ключевые модули
+### 2.2 Уровни абстракции
 
-| Модуль | Назначение | Заметки |
-|--------|------------|---------|
-| **Dialogue Agent** | Ведение диалога с пользователем | Проверка завершения диалога внутри |
-| **Notify Agent** | Доставка уведомлений пользователям | Фильтрация через историю доставки |
-| **Processing Agents** | Обработка данных в шине | Подключаемые модули, используют LLM |
-| **Event Bus** | Шина данных для коммуникации | In-memory pub/sub + персистентность |
-| **Storage** | Хранение всех данных | SQLite (dev) / YDB (prod) |
-| **SIM** | Эмуляция пользователей для тестов | Генератор сообщений |
-| **VS UI** | Визуализация для наблюдаемости | Polling API, timeline + swimlanes |
+**Прикладной уровень:**
+- Dialogue & Notify Agents — диалоговая система
+- Processing Agents — подключаемые модули обработки
+- SIM — генератор тестовых данных
+- VS UI — визуализация
+
+**Транспортный уровень:**
+- Event Bus — шина событий для коммуникации
+
+**Инфраструктурный уровень:**
+- Storage — персистентное хранение всех данных
 
 ---
 
 ## 3. Детальное описание модулей
 
-### 3.1 Dialogue Agent
+### 3.1 Dialogue & Notify Agents (единая диалоговая система)
 
-**Назначение:** Ведение диалога с пользователем, сохранение в буфер, детекция завершения.
+**Назначение:** AI-ассистент для каждого пользователя, который ведет диалог и доставляет уведомления.
 
 **Ключевая логика:**
+
 ```python
 class DialogueAgent:
+    """
+    AI-ассистент для ведения диалога с пользователем.
+    """
     async def on_message(self, user_id: str, message: str):
-        # 1. Добавляем в буфер
-        await self.storage.append_to_buffer(user_id, message)
+        # 1. Генерация ответа через LLM
+        response = await self.llm.generate_response(
+            user_context=await self.get_user_context(user_id),
+            message=message
+        )
 
-        # 2. Проверяем завершение диалога
+        # 2. Отправка ответа пользователю
+        await self.send_to_user(user_id, response)
+
+        # 3. Сохранение в историю
+        await self.storage.save_message(user_id, message, response)
+
+        # 4. Проверка завершения диалога (для упаковки в шину)
         if self.check_dialogue_complete(user_id):
-            # 3. Упаковываем и отправляем в шину
             await self.package_dialogue(user_id)
 ```
 
-**Детекция завершения диалога (бывший DBD):**
+**Диалоговая политика (единая для Dialogue и Notify):**
+- Стиль коммуникации (формальный/неформальный)
+- Уровень детализации ответов
+- Правила поведения (когда переспрашивать, когда уточнять)
+- Контекст пользователя (роль, текущий фокус, интересы)
+
+**Детекция завершения диалога:**
 - Явный маркер ("всё, спасибо")
 - Таймаут (пауза > N минут)
 - Внутри DialogueAgent как метод
 
-**Формирует событие:**
+**Notify Agent:**
+- Инициирует диалог для доставки уведомлений
+- Использует ту же диалоговую политику, что и Dialogue Agent
+- Получает уведомления от Processing Agents (они сами помечают что кому доставить)
+- Проверяет дубликаты через историю доставки
+
+**Формирует события:**
 ```python
+# При завершении диалога
 {
     "type": "dialogue_boundary",
     "user_id": "user-1",
     "reason": "timeout",
     "messages": [...]
 }
+
+# При доставке уведомления
+{
+    "type": "notification_sent",
+    "from_user": "user-1",
+    "to_user": "user-2",
+    "content": "...",
+    "source_agent": "TaskManager"
+}
 ```
 
 ---
 
-### 3.2 Notify Agent
+### 3.2 Processing Agents (подключаемые модули)
 
-**Назначение:** Доставка уведомлений от Processing Agents пользователям.
-
-**Ключевая логика:**
-```python
-class NotifyAgent:
-    async def on_processed_event(self, event: ProcessedEvent):
-        # 1. Проверяем релевантность для пользователя
-        if await self.is_relevant(event.to_user, event):
-            # 2. Проверяем дубликаты (семантические)
-            if not await self.already_delivered(event.to_user, event):
-                # 3. Доставляем
-                await self.deliver(event.to_user, event)
-```
-
-**Фильтрация:**
-- История доставки (хранится в storage)
-- Семантическая дедупликация (через LLM)
-
----
-
-### 3.3 Processing Agents
-
-**Назначение:** Обработка данных из Event Bus, извлечение сущностей.
+**Назначение:** Обработка данных из Event Bus, управление сущностями, принятие решений о доставке.
 
 **Архитектурные принципы:**
-- Подключаемые модули
+- **Подключаемые через интерфейс** — единый контракт для всех агентов
 - Каждый агент имеет свой state и memory
-- Все используют LLM
-- Могут использовать разные подходы (SGR, function calling, другие)
+- Все используют LLM (SGR Agent Core или другие подходы)
+- **Агенты сами решают** кому что доставить (помечают recipients)
 
 **Базовый интерфейс:**
+
 ```python
-class BaseProcessingAgent(ABC):
+class IProcessingAgent(ABC):
+    """Интерфейс для подключения обработчиков"""
+
     id: str
     name: str
 
     async def start(self): ...
+    async def stop(self): ...
 
     async def process(
         self,
@@ -165,54 +187,104 @@ class BaseProcessingAgent(ABC):
     ) -> ProcessingResult: ...
 
     async def get_state(self) -> AgentState: ...
+    async def save_state(self, state: AgentState): ...
+
+
+class ProcessingResult(TypedDict):
+    """Результат обработки"""
+    entities: list[Entity]           # Извлеченные/обновленные сущности
+    notifications: list[Notification]  # Кому что доставить
+    reasoning: Optional[str]         # Reasoning trace для VS UI
 ```
 
-**Примеры агентов (определяются позже):**
-- TaskExtractor — извлечение задач
-- DeadlineTracker — отслеживание сроков
-- DependencyFinder — поиск связей
+**Примеры агентов:**
+
+**TaskManager:**
+- Отслеживает задачи и сроки
+- Ведет базу задач (создание, обновление, закрытие)
+- Соотносит задачи из сообщений с существующими в базе
+- Помечает ответственных и дедлайны
+- Отправляет уведомления о приближении сроков
+
+**ContextManager:**
+- Отслеживает движение информации между пользователями
+- Определяет что из входящих данных может быть полезно конкретному пользователю
+- Помечает: "это нужно User-X в его задачах"
+- Анализирует контекст каждого пользователя (текущий фокус, роль)
+
+**Future agents:**
+- RiskDetector — выявление рисков и конфликтов
+- DependencyFinder — поиск связей между задачами
+- DeadlineWatcher — мониторинг сроков
+- (любые другие через единый интерфейс)
+
+**Развитие системы агентов:**
+- Сначала: рамочная система с интерфейсом `IProcessingAgent`
+- Когда рамочная система готова: отдельная ветка разработки агентов
+- Tech Lead НЕ занимается составом агентов
 
 ---
 
-### 3.4 Event Bus
+### 3.3 Event Bus (транспортный уровень)
 
-**Назначение:** Шина данных для коммуникации между модулями.
+**Назначение:** Шина событий для коммуникации между модулями.
 
 **Реализация:**
 - In-memory pub/sub (EventEmitter pattern)
-- Персистентность в Storage
-- Топики: `raw`, `processed`, `outbound`
+- Персистентность в Storage (все события сохраняются)
+- Топики: `raw`, `processed`
 
 **Интерфейс:**
+
 ```python
 class IEventBus(ABC):
-    async def publish(self, topic: Topic, message: BusMessage): ...
-    async def subscribe(self, topic: Topic, handler: Handler): ...
-    async def get_history(self, topic: Topic, filter: Filter): ...
+    """Шина событий"""
+
+    async def publish(self, topic: Topic, message: BusMessage) -> MessageId:
+        """Публикация события"""
+
+    async def subscribe(self, topic: Topic, handler: Handler) -> Subscription:
+        """Подписка на события"""
+
+    async def get_history(self, topic: Topic, filter: Filter) -> list[BusMessage]:
+        """Чтение истории событий"""
 ```
+
+**Соотношение с Storage:**
+- Event Bus — транспортный уровень (коммуникация)
+- Storage — инфраструктурный уровень (персистентность)
+- Event Bus использует Storage для сохранения событий
 
 ---
 
-### 3.5 Storage
+### 3.4 Storage (инфраструктурный уровень)
 
-**Назначение:** Персистентное хранение всех данных.
+**Назначение:** Персистентное хранение всех данных системы.
 
-**Таблицы/коллекции:**
-- `messages` — сообщения пользователей
-- `events` — события для VS UI
-- `agent_conversations` — истории диалогов агентов
-- `agent_states` — состояния агентов
-- `reasoning_traces` — reasoning шаги (для SGR)
+**Сущности:**
+
+| Сущность | Описание |
+|----------|----------|
+| `messages` | Сообщения пользователей (диалоги) |
+| `events` | События из Event Bus (для VS UI и replay) |
+| `agent_conversations` | Истории диалогов processing agents (SGR) |
+| `agent_states` | Состояния processing agents |
+| `tasks` | Задачи (TaskManager) |
+| `user_contexts` | Контексты пользователей (роль, фокус, интересы) |
+| `notifications_log` | Лог доставленных уведомлений |
 
 **Интерфейс:**
+
 ```python
 class IStorage(ABC):
+    """Единый интерфейс хранения"""
+
     # Messages
     async def save_message(self, msg: Message): ...
     async def get_messages(self, filter: Filter): ...
 
-    # Events (для VS)
-    async def save_event(self, event: TimelineEvent): ...
+    # Events
+    async def save_event(self, event: BusMessage): ...
     async def get_events(self, filter: Filter): ...
 
     # Agent conversations
@@ -222,17 +294,30 @@ class IStorage(ABC):
     # Agent states
     async def save_agent_state(self, agent_id: str, state: dict): ...
     async def load_agent_state(self, agent_id: str): ...
+
+    # Tasks (TaskManager)
+    async def save_task(self, task: Task): ...
+    async def get_tasks(self, filter: Filter): ...
+
+    # User contexts
+    async def save_user_context(self, user_id: str, ctx: UserContext): ...
+    async def get_user_context(self, user_id: str): ...
 ```
 
 **Dev/Prod:**
-- Dev: SQLite (файл, ноль деплоя)
+- Dev: SQLite (файл, ноль деплоя, JSON поддержка)
 - Prod: YDB или другое решение (соотв. рос. законодательству)
 
 **ADR:** Будет отдельное решение по выбору БД для продакшена.
 
+**Абстракции над Storage:**
+- Модули могут иметь промежуточный слой (Repository pattern)
+- Пример: `TaskRepository` над Storage для работы с задачами
+- Пример: `UserContextRepository` для работы с контекстами
+
 ---
 
-### 3.6 SIM (Simulation Layer)
+### 3.5 SIM (Simulation Layer)
 
 **Назначение:** Эмуляция пользователей для тестирования.
 
@@ -249,42 +334,20 @@ class IStorage(ABC):
 
 **Интеграция:**
 - Подключается к DialogueAgent как обычный пользователь
-- Генерирует события в VS UI для отладки
+- Генерирует события в Event Bus
 
 ---
 
-### 3.7 VS UI (Visualization Service)
+### 3.6 VS UI (Visualization Service)
 
 **Назначение:** Наглядная визуализация для наблюдаемости.
 
-**Общие рамки (детали — отдельный архитектор):**
+**Общие рамки:**
+- Polling API для получения данных
+- Timeline + swimlanes как основные виды
+- Agent reasoning traces для отладки
 
-**Backend API:**
-```python
-# Polling endpoint
-GET /api/timeline?since=2025-01-24T10:00:00
-
-Response:
-{
-    "events": [
-        {"timestamp": "...", "type": "message_received", "user_id": "...", ...},
-        {"timestamp": "...", "type": "dialogue_boundary", ...},
-        {"timestamp": "...", "type": "agent_reasoning", ...}
-    ]
-}
-```
-
-**Frontend views:**
-- **Timeline** — графический timeline (НЕ текстовый список)
-- **Swimlanes** — дорожки по пользователям / объектам
-- **User Context** — детализация по клику
-- **Agent Reasoning** — что думают агенты (SGR traces)
-
-**Коммуникация:**
-- Polling (простота)
-- Задержка 1+ секунда — норма
-
-**Фронтенд-стек:** Выбирается по критериям наглядности + простоты разработки.
+**Детальная архитектура:** См. `00_docs/architecture/visualization.md`
 
 ---
 
@@ -294,8 +357,8 @@ Response:
 
 **Прямой трекинг** (для того, что не в основном storage):
 ```python
-await events.track('dialogue_boundary', {...})
 await events.track('agent_reasoning_step', {...})
+await events.track('dialogue_boundary', {...})
 ```
 
 **Извлечение из storage** (для основных данных):
@@ -335,7 +398,7 @@ class EventTracker:
 | **LLM Integration** | SGR Agent Core | Schema-Guided Reasoning фреймворк |
 | **Storage Dev** | SQLite | Файл, ноль деплоя, JSON поддержка |
 | **Storage Prod** | YDB (TBD) | ADR позже |
-| **Event Bus** | In-memory + Storage | Простой EventEmitter |
+| **Event Bus** | In-memory + persistence | EventEmitter + Storage |
 
 ### 5.2 LLM Provider Layer
 
@@ -363,12 +426,7 @@ class LLMProviderWithRetry:
 - Простота разработки
 - Timeline + swimlanes
 
-**Библиотеки для изучения:**
-- Vis.js Timeline
-- D3.js
-- React Flow
-
-**Детали:** Отдельный архитектор для VS.
+**Детали:** См. `00_docs/architecture/visualization.md`
 
 ---
 
@@ -394,10 +452,10 @@ class LLMProviderWithRetry:
 
 **Processing Agents на базе SGR:**
 ```python
-class TaskExtractorAgent(SGRToolCallingAgent):
+class TaskManagerAgent(SGRToolCallingAgent):
     """
-    Reasoning: анализ сообщения через LLM
-    Action: сохранение задачи через tool
+    Reasoning: анализ задачи через LLM
+    Action: сохранение/обновление в базе через tool
     """
 ```
 
@@ -412,7 +470,7 @@ await storage.save_conversation(agent.id, agent.conversation)
 ```python
 # Reasoning phase возвращает структуру
 {
-    "reasoning": "Анализирую сообщение...",
+    "reasoning": "Анализирую задачу...",
     "selected_tool": "save_task",
     "tool_arguments": {...}
 }
@@ -452,24 +510,25 @@ await events.track('agent_reasoning', {
 ### 8.1 От пользователя в систему
 
 ```
-User → DialogueAgent → Storage (buffer)
+User → DialogueAgent → Storage (messages)
       → [dialogue complete] → EventBus (raw)
-      → ProcessingAgent → EventBus (processed)
+      → ProcessingAgent → EventBus (processed) → Storage
 ```
 
 ### 8.2 От системы к пользователю
 
 ```
-EventBus (processed) → NotifyAgent
-      → [check relevance] → EventBus (outbound)
-      → DialogueAgent → User
+EventBus (processed) → ProcessingAgent
+      → [agent решает: уведомить User-B] → EventBus (processed)
+      → NotifyAgent → User-B
 ```
 
 ### 8.3 Между пользователями
 
 ```
-User-A сообщает → EventBus → Processing
-      → EventBus → Notify-Agent-B → User-B получает
+User-A сообщает → EventBus → ProcessingAgent (TaskManager)
+      → [TaskManager: нужно уведомить User-B] → EventBus
+      → NotifyAgent-B → User-B получает
 ```
 
 ---
@@ -494,16 +553,24 @@ User-A сообщает → EventBus → Processing
 # Интерфейсы
 class IStorage(ABC): ...
 class IEventBus(ABC): ...
+class IProcessingAgent(ABC): ...
 class ILLMProvider(ABC): ...
 
 # Dev-реализации
-InMemoryStorage()
 SQLiteStorage()
+InMemoryEventBus()
 
 # Prod-реализации (будет)
 YDBStorage()
-KafkaEventBus()
 ```
+
+### 9.4 Интерфейсы для расширения
+
+**Processing Agents:**
+- Единый интерфейс `IProcessingAgent`
+- Подключение через регистрацию в системе
+- State management через Storage
+- Когда рамочная система готова — отдельная ветка разработки агентов
 
 ---
 
@@ -511,19 +578,19 @@ KafkaEventBus()
 
 | Вопрос | Статус |
 |--------|--------|
-| Конкретный состав Processing Agents | Отложено до Tech Lead |
-| Детальная архитектура VS UI | Отложено до отдельного архитектора |
+| Детальная архитектура VS UI | См. `visualization.md` |
 | Выбор БД для продакшена | ADR позже |
-| Фронтенд-стек для VS | Отложено до архитектора VS |
+| Фронтенд-стек для VS | См. `visualization.md` |
 | DI-контейнер детализация | Tech Lead |
+| Конкретные Processing Agents | Отдельная ветка разработки после рамочной системы |
 
 ---
 
 ## 11. Следующие шаги
 
 1. ✅ Архитектура зафиксирована (этот документ)
-2. → **Tech Lead:** Создать `implementation_plan.md`, `backlog.md`, task briefs
-3. → **Architect VS:** Детальная архитектура визуализации (отдельная сессия)
+2. ✅ Визуализация — отдельный документ (`visualization.md`)
+3. → **Tech Lead:** Создать `implementation_plan.md`, `backlog.md`, task briefs
 4. → **ADR:** Выбор БД для продакшена (когда станет актуально)
 
 ---
