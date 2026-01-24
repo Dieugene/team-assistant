@@ -67,12 +67,12 @@ flowchart TB
     User1 -->|messages| DA
     User2 -->|messages| DA
     DA -->|raw| EB
-    PL <|---|all events| EB
+    EB -->|all events| PL
     PL -->|processed, notif| EB
-    CA <|---|notif| EB
+    EB -->|notif| CA
     CA -->|invoke| DA
     SIM -->|invoke| DA
-    VSUI <|---|polling| ST
+    ST -->|polling| VSUI
 
     %% Storage integration
     EB <-->|persist| ST
