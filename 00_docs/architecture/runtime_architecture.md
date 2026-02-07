@@ -80,59 +80,57 @@
 
 ### 3.2. Диаграмма
 
+**Фаза 1: Сохранение и генерация ответа**
+
 ```mermaid
 sequenceDiagram
     autonumber
     participant User as Пользователь/SIM
     participant DA as DialogueAgent
     participant Storage as Storage
-    participant EB as Event Bus
-    participant PL as ProcessingLayer
-    participant PA as ProcessingAgent
 
     User->>DA: invoke(user_id, message)
-
-    rect rgb(240, 248, 255)
-        Note over DA,Storage: Фаза 1: Сохранение и генерация ответа
-        DA->>Storage: save_message(user_id, message, role=user)
-        DA->>DA: Добавить в messages_buffer
-        DA->>DA: Генерация ответа через LLM
-        DA->>Storage: save_message(user_id, response, role=assistant)
-        DA->>DA: Обновить last_activity
-    end
-
+    DA->>Storage: save_message(user_id, message, role=user)
+    DA->>DA: Добавить в messages_buffer
+    DA->>DA: Генерация ответа через LLM
+    DA->>Storage: save_message(user_id, response, role=assistant)
+    DA->>DA: Обновить last_activity
     DA-->>User: response
+```
 
-    opt Таймаут не истек
-        Note over DA: Диалог продолжается<br/>Накопление в buffer
+**Фаза 2-4: Публикация фрагмента и обработка агентами**
+
+```mermaid
+sequenceDiagram
+    autonumber
+    participant DA as DialogueAgent
+    participant EB as Event Bus
+    participant PL as ProcessingLayer
+    participant PA1 as Agent1
+    participant PA2 as Agent2
+    participant PA3 as Agent3
+
+    Note over DA: Таймаут истёк или явное завершение
+
+    DA->>DA: Собрать DialogueFragment из buffer
+    DA->>EB: publish(raw, DialogueFragment)
+    DA->>DA: Очистить buffer для следующей сессии
+
+    EB->>PL: notify_all(raw, DialogueFragment)
+
+    par Параллельно всем агентам
+        PL->>PA1: process(raw, DialogueFragment)
+    and
+        PL->>PA2: process(raw, DialogueFragment)
+    and
+        PL->>PA3: process(raw, DialogueFragment)
     end
 
-    opt Таймаут истёк (или явное завершение)
-        rect rgb(255, 245, 240)
-            Note over DA,EB: Фаза 2: Публикация фрагмента
-            DA->>DA: Собрать DialogueFragment из buffer
-            DA->>EB: publish(raw, DialogueFragment)
-            DA->>DA: Очистить buffer для следующей сессии
-        end
+    Note over PA1,PA3: Агенты публикуют результаты
 
-        rect rgb(245, 255, 245)
-            Note over EB,PA: Фаза 3: Обработка агентами
-            EB->>PL: notify_all(raw, DialogueFragment)
-            par Параллельно всем агентам
-                PL->>PA1: process(raw, DialogueFragment)
-                PL->>PA2: process(raw, DialogueFragment)
-                PL->>PA3: process(raw, DialogueFragment)
-            end
-        end
-
-        rect rgb(245, 245, 255)
-            Note over PA,EB: Фаза 4: Результаты обработки
-            opt Агент создал результат
-                PA->>EB: publish(processed, result)
-                PA->>EB: publish(notification, notification) ~если нужно уведомить~
-            end
-        end
-    end
+    PA1->>EB: publish(processed, result)
+    PA2->>EB: publish(notification, notification)
+    PA3->>EB: publish(processed, result)
 ```
 
 ### 3.3. Фазы сценария
@@ -163,41 +161,42 @@ sequenceDiagram
 
 ### 4.2. Диаграмма
 
+**Фаза 1: Триггер проверки таймаутов**
+
 ```mermaid
 sequenceDiagram
     autonumber
     participant Scheduler as Scheduler / Timer
     participant DA as DialogueAgent
     participant Storage as Storage
+
+    Scheduler->>DA: check_timeouts(timeout_minutes, current_timestamp)
+    DA->>Storage: get_all_active_dialogues()
+    Storage-->>DA: list[DialogueState]
+```
+
+**Фаза 2: Обработка истекших диалогов**
+
+```mermaid
+sequenceDiagram
+    autonumber
+    participant DA as DialogueAgent
+    participant Storage as Storage
     participant EB as Event Bus
     participant PL as ProcessingLayer
 
-    rect rgb(255, 250, 240)
-        Note over Scheduler,Storage: Триггер: Проверка таймаутов
-        Scheduler->>DA: check_timeouts(timeout_minutes, current_timestamp)
-        DA->>Storage: get_all_active_dialogues()
-        Storage-->>DA: list[DialogueState]
-    end
+    Note over DA: Для каждого диалога с истёкшим таймаутом
 
-    loop По каждому диалогу
-        DA->>DA: if (current - last_activity) > timeout
-            rect rgb(240, 248, 255)
-                Note over DA,EB: Фиксация фрагмента
-                DA->>DA: Собрать DialogueFragment из buffer
-                DA->>EB: publish(raw, DialogueFragment)
-                DA->>Storage: save_dialogue_fragment(user_id, fragment)
-                DA->>DA: Очистить buffer, обновить состояние
-            end
+    DA->>DA: Проверить: (current - last_activity) > timeout
+    DA->>DA: Собрать DialogueFragment из buffer
+    DA->>EB: publish(raw, DialogueFragment)
+    DA->>Storage: save_dialogue_fragment(user_id, fragment)
+    DA->>DA: Очистить buffer, обновить состояние
 
-            rect rgb(245, 255, 245)
-                Note over EB,PL: Обработка агентами
-                EB->>PL: notify_all(raw, DialogueFragment)
-                Note over PL: Агенты обрабатывают параллельно
-            end
-        end
-    end
+    EB->>PL: notify_all(raw, DialogueFragment)
+    Note over PL: Агенты обрабатывают параллельно
 
-    DA-->>Scheduler: list[expired_dialogue_ids]
+    DA-->>DA: Добавить в expired_dialogue_ids
 ```
 
 ### 4.3. Параметры
@@ -225,46 +224,49 @@ sequenceDiagram
 
 ### 5.2. Диаграмма
 
+**Фаза 1: Публикация уведомления и анализ ContextAgent**
+
 ```mermaid
 sequenceDiagram
     autonumber
     participant PA as ProcessingAgent
     participant EB as Event Bus
     participant CA as ContextAgent
+
+    PA->>EB: publish(notification, NotificationPayload)
+    EB->>CA: notify(notification, NotificationPayload)
+
+    Note over CA: Анализ: все notifications,<br/>история диалога, другие события
+    CA->>CA: Решение: доставлять ли, как формулировать
+```
+
+**Фаза 2: Доставка пользователю (если оправдана)**
+
+```mermaid
+sequenceDiagram
+    autonumber
+    participant CA as ContextAgent
     participant DA as DialogueAgent
+    participant Storage as Storage
     participant User as Пользователь
+
+    Note over CA: Решение: доставить
+
+    CA->>DA: invoke(user_id, notification_message)
+    DA->>Storage: save_message(user_id, notification, role=assistant)
+    DA-->>User: notification_message
+```
+
+**Фаза 3: Визуализация**
+
+```mermaid
+sequenceDiagram
+    autonumber
+    participant EB as Event Bus
     participant VS as VS UI
 
-    rect rgb(255, 245, 240)
-        Note over PA,EB: Processing Agent решил уведомить
-        PA->>EB: publish(notification, NotificationPayload)
-    end
-
-    rect rgb(240, 248, 255)
-        Note over EB,CA: ContextAgent видит широкую картину
-        EB->>CA: notify(notification, NotificationPayload)
-        CA->>CA: Анализ: все notifications, история диалога, другие события
-        CA->>CA: Решение: доставлять ли, как формулировать
-    end
-
-    opt Доставка оправдана
-        rect rgb(245, 255, 245)
-            Note over CA,User: Доставка через DialogueAgent
-            CA->>DA: invoke(user_id, notification_message)
-            DA->>Storage: save_message(user_id, notification, role=assistant)
-            DA-->>User: notification_message
-        end
-    end
-
-    opt Доставка не оправдана
-        Note over CA: Игнорирование или отложенная доставка
-    end
-
-    rect rgb(245, 245, 255)
-        Note over CA,VS: Для визуализации
-        EB->>VS: event_store(notification_sent)
-        Note over VS: Отображается в Timeline
-    end
+    EB->>VS: event_store(notification_sent)
+    Note over VS: Отображается в Timeline
 ```
 
 ### 5.3. Логика ContextAgent
@@ -299,56 +301,70 @@ sequenceDiagram
 
 ### 6.2. Диаграмма
 
+**Фаза 1: Инициализация инфраструктуры**
+
 ```mermaid
 sequenceDiagram
     autonumber
     participant Bootstrap as Bootstrap
     participant Storage as Storage
     participant EB as Event Bus
+
+    Bootstrap->>Storage: initialize()
+    Storage-->>Bootstrap: ready
+    Bootstrap->>EB: initialize(storage)
+    EB-->>Bootstrap: ready
+```
+
+**Фаза 2: Регистрация Processing Agents**
+
+```mermaid
+sequenceDiagram
+    autonumber
+    participant Bootstrap as Bootstrap
     participant PL as ProcessingLayer
     participant PA as ProcessingAgent
+    participant Storage as Storage
+
+    loop Для каждого агента
+        Bootstrap->>PL: register(agent)
+        PL->>PA: start(storage, event_bus, llm_provider)
+        PA->>Storage: restore_state(agent_name) ~если есть~
+        PA-->>PL: ready
+    end
+    PL-->>Bootstrap: all_agents_ready
+```
+
+**Фаза 3: Запуск диалоговой системы**
+
+```mermaid
+sequenceDiagram
+    autonumber
+    participant Bootstrap as Bootstrap
     participant CA as ContextAgent
     participant DA as DialogueAgent
+    participant EB as Event Bus
+    participant Storage as Storage
+
+    Bootstrap->>CA: start(event_bus, dialogue_agent)
+    CA->>EB: subscribe(notification, handler)
+    CA-->>Bootstrap: ready
+
+    Bootstrap->>DA: start(storage, llm_provider)
+    DA->>Storage: get_active_dialogues() ~для recovery~
+    DA-->>Bootstrap: ready
+```
+
+**Фаза 4: Запуск VS UI (опционально)**
+
+```mermaid
+sequenceDiagram
+    autonumber
+    participant Bootstrap as Bootstrap
     participant VS as VS UI
 
-    rect rgb(240, 248, 255)
-        Note over Bootstrap,Storage: Фаза 1: Инициализация инфраструктуры
-        Bootstrap->>Storage: initialize()
-        Storage-->>Bootstrap: ready
-        Bootstrap->>EB: initialize(storage)
-        EB-->>Bootstrap: ready
-    end
-
-    rect rgb(255, 245, 240)
-        Note over Bootstrap,PL: Фаза 2: Регистрация Processing Agents
-        loop Для каждого агента
-            Bootstrap->>PL: register(agent)
-            PL->>PA: start(storage, event_bus, llm_provider)
-            PA->>Storage: restore_state(agent_name) ~если есть~
-            PA-->>PL: ready
-        end
-        PL-->>Bootstrap: all_agents_ready
-    end
-
-    rect rgb(245, 255, 245)
-        Note over Bootstrap,DA: Фаза 3: Запуск диалоговой системы
-        Bootstrap->>CA: start(event_bus, dialogue_agent)
-        CA->>EB: subscribe(notification, handler)
-        CA-->>Bootstrap: ready
-
-        Bootstrap->>DA: start(storage, llm_provider)
-        DA->>Storage: get_active_dialogues() ~для recovery~
-        DA-->>Bootstrap: ready
-    end
-
-    rect rgb(245, 245, 255)
-        Note over Bootstrap,VS: Фаза 4: Запуск VS UI (опционально)
-        Bootstrap->>VS: start(storage, event_bus)
-        VS-->>Bootstrap: ready (polling started)
-    end
-
-    Bootstrap->>EB: publish(system_start, {})
-    Note over Bootstrap: Система готова к работе
+    Bootstrap->>VS: start(storage, event_bus)
+    VS-->>Bootstrap: ready (polling started)
 ```
 
 ### 6.3. Порядок зависимостей
@@ -433,52 +449,71 @@ sequenceDiagram
 
 ### 8.2. Диаграмма
 
+**Фаза 1: Прекратить прием новых сообщений**
+
 ```mermaid
 sequenceDiagram
     autonumber
     participant Signal as OS Signal
     participant Bootstrap as Bootstrap
     participant DA as DialogueAgent
+
+    Signal->>Bootstrap: SIGTERM/SIGINT
+    Bootstrap->>DA: stop_accepting_new()
+    DA-->>Bootstrap: accepting_stopped
+```
+
+**Фаза 2: Завершить активные диалоги**
+
+```mermaid
+sequenceDiagram
+    autonumber
+    participant Bootstrap as Bootstrap
+    participant DA as DialogueAgent
+    participant Storage as Storage
+
+    Bootstrap->>DA: wait_active_dialogues(timeout)
+
+    loop Активные диалоги
+        DA->>DA: Завершить или зафиксировать фрагмент
+        DA->>Storage: save_dialogue_fragment()
+    end
+
+    DA-->>Bootstrap: all_dialogues_closed
+```
+
+**Фаза 3: Остановить агенты**
+
+```mermaid
+sequenceDiagram
+    autonumber
+    participant Bootstrap as Bootstrap
     participant PL as ProcessingLayer
     participant PA as ProcessingAgent
+    participant Storage as Storage
+
+    loop Для каждого агента
+        Bootstrap->>PL: stop_agent(agent)
+        PL->>PA: stop()
+        PA->>Storage: save_state(agent_state)
+        PA-->>PL: stopped
+    end
+
+    PL-->>Bootstrap: all_agents_stopped
+```
+
+**Фаза 4: Завершение работы**
+
+```mermaid
+sequenceDiagram
+    autonumber
+    participant Bootstrap as Bootstrap
     participant EB as Event Bus
     participant Storage as Storage
 
-    Signal->>Bootstrap: SIGTERM/SIGINT
-
-    rect rgb(255, 250, 240)
-        Note over Bootstrap,DA: Фаза 1: Прекратить прием новых сообщений
-        Bootstrap->>DA: stop_accepting_new()
-        DA-->>Bootstrap: accepting_stopped
-    end
-
-    rect rgb(240, 248, 255)
-        Note over Bootstrap,DA: Фаза 2: Завершить активные диалоги
-        Bootstrap->>DA: wait_active_dialogues(timeout)
-        loop Активные диалоги
-            DA->>DA: Завершить или зафиксировать фрагмент
-            DA->>Storage: save_dialogue_fragment()
-        end
-        DA-->>Bootstrap: all_dialogues_closed
-    end
-
-    rect rgb(245, 255, 245)
-        Note over Bootstrap,PL: Фаза 3: Остановить агенты
-        loop Для каждого агента
-            Bootstrap->>PL: stop_agent(agent)
-            PL->>PA: stop()
-            PA->>Storage: save_state(agent_state)
-            PA-->>PL: stopped
-        end
-        PL-->>Bootstrap: all_agents_stopped
-    end
-
-    rect rgb(245, 245, 255)
-        Note over Bootstrap,Storage: Фаза 4: Завершение работы
-        Bootstrap->>EB: stop()
-        Bootstrap->>Storage: close_connections()
-        Storage-->>Bootstrap: closed
-    end
+    Bootstrap->>EB: stop()
+    Bootstrap->>Storage: close_connections()
+    Storage-->>Bootstrap: closed
 
     Note over Bootstrap: System terminated
 ```
