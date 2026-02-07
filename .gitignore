@@ -19,3 +19,8 @@ Thumbs.db
 
 # Git
 *.orig
+
+# Test files for Claude launcher
+launch_claude.*
+prompt.txt
+test_multiline.bat
