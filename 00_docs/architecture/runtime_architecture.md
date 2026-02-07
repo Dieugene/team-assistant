@@ -1,7 +1,7 @@
 # Runtime Architecture
 ## Сквозные сценарии работы системы
 
-**Версия:** 1.1
+**Версия:** 1.2
 **Дата:** 2025-02-07
 
 **Связанные документы:**
@@ -23,10 +23,8 @@
 - **ProcessingLayer** — массив Processing Agents
 - **ContextAgent** — big picture + доставка уведомлений
 - **Event Bus** — шина событий (raw, processed, notification) с push-моделью уведомлений
-- **Event Tracker** — фиксирует события для VS UI в Storage (events table)
 - **Storage** — персистентное хранение (messages, events, agent_data)
 - **SIM** — генератор тестовых данных
-- **VS UI** — визуализация через polling API
 
 ### 1.3. Сценарии в скоупе
 
@@ -51,9 +49,7 @@
 | ProcessingAgent | Любой агент из ProcessingLayer (TaskManager, ContextManager, ...) |
 | ContextAgent | Агент big picture, подписанный на notification |
 | EventBus | Шина событий с push-моделью: publish → уведомление подписчиков |
-| EventTracker | Компонент, фиксирующий события для VS UI в Storage.events |
 | Storage | Персистентное хранение: messages, events, agent_data |
-| VS UI | Визуализационный сервис (polling Storage.events) |
 
 ### 2.2. Артефакты
 
@@ -65,7 +61,6 @@
 | BusMessage | Сообщение в Event Bus с топиком, payload, links |
 | Notification | Уведомление для доставки пользователю |
 | DialogueState | Состояние активного диалога (buffer, last_activity, is_active) |
-| TimelineEvent | Событие для VS UI (в Storage.events) |
 
 ### 2.3. Event Bus: Push-модель
 
@@ -82,7 +77,7 @@ await event_bus.publish(topic, message)
 **Подписчики:**
 - `raw` → ProcessingLayer (все агенты)
 - `notification` → ContextAgent
-- `all topics` → EventTracker (для VS UI)
+- `all topics` → EventTracker (для VS UI, см. раздел 10)
 
 ---
 
@@ -98,7 +93,6 @@ await event_bus.publish(topic, message)
 - Ответ пользователю
 - Сохранение в Storage.messages
 - Публикация в Event Bus для Processing Agents
-- Фиксация в Storage.events для VS UI
 
 ### 3.2. Диаграмма
 
@@ -110,7 +104,6 @@ sequenceDiagram
     participant User as Пользователь/SIM
     participant DA as DialogueAgent
     participant Storage as Storage
-    participant ET as EventTracker
 
     User->>DA: invoke(user_id, message)
     DA->>Storage: save_message(user_id, message, role=user)
@@ -119,10 +112,6 @@ sequenceDiagram
     DA->>Storage: save_message(user_id, response, role=assistant)
     DA->>DA: Обновить last_activity
     DA-->>User: response
-
-    Note over ET,Storage: Для VS UI
-    DA->>ET: track(message_received)
-    ET->>Storage: save_event(TimelineEvent)
 ```
 
 **Фаза 2-4: Публикация фрагмента и обработка агентами**
@@ -135,17 +124,12 @@ sequenceDiagram
     participant PL as ProcessingLayer
     participant PA1 as Agent1
     participant PA2 as Agent2
-    participant ET as EventTracker
 
     Note over DA: Таймаут истёк или явное завершение
 
     DA->>DA: Собрать DialogueFragment из buffer
     DA->>EB: publish(raw, DialogueFragment)
     DA->>DA: Очистить buffer для следующей сессии
-
-    Note over ET,EB: Для VS UI
-    EB->>ET: on_event(dialogue_fragment_published)
-    ET->>Storage: save_event(TimelineEvent)
 
     EB->>PL: notify_all(raw, DialogueFragment)
 
@@ -159,20 +143,16 @@ sequenceDiagram
 
     PA1->>EB: publish(processed, result)
     PA2->>EB: publish(notification, notification)
-
-    Note over ET,EB: Для VS UI
-    EB->>ET: on_event(agent_result)
-    ET->>Storage: save_event(TimelineEvent)
 ```
 
 ### 3.3. Фазы сценария
 
 | Фаза | Описание | Артефакты |
 |------|----------|-----------|
-| 1 | Сохранение и генерация ответа | Message в Storage.messages, TimelineEvent в Storage.events |
-| 2 | Публикация фрагмента | BusMessage(raw), TimelineEvent |
+| 1 | Сохранение и генерация ответа | Message в Storage.messages |
+| 2 | Публикация фрагмента | BusMessage(raw) |
 | 3 | Обработка агентами | Вызов process() для всех Processing Agents |
-| 4 | Результаты обработки | BusMessage(processed), BusMessage(notification), TimelineEvents |
+| 4 | Результаты обработки | BusMessage(processed), BusMessage(notification) |
 
 ### 3.4. DialogueBuffer: детали
 
@@ -233,7 +213,6 @@ sequenceDiagram
     participant Storage as Storage
     participant EB as Event Bus
     participant PL as ProcessingLayer
-    participant ET as EventTracker
 
     Note over DA: Для каждого диалога с истёкшим таймаутом
 
@@ -242,10 +221,6 @@ sequenceDiagram
     DA->>Storage: save_dialogue_fragment(user_id, fragment)
     DA->>EB: publish(raw, DialogueFragment)
     DA->>DA: Очистить buffer, обновить состояние
-
-    Note over ET,EB: Для VS UI
-    EB->>ET: on_event(dialogue_fragment_published)
-    ET->>Storage: save_event(TimelineEvent)
 
     EB->>PL: notify_all(raw, DialogueFragment)
     Note over PL: Агенты обрабатывают параллельно
@@ -309,14 +284,8 @@ sequenceDiagram
     participant PA as ProcessingAgent
     participant EB as Event Bus
     participant CA as ContextAgent
-    participant ET as EventTracker
 
     PA->>EB: publish(notification, NotificationPayload)
-
-    Note over ET,EB: Для VS UI
-    EB->>ET: on_event(notification_generated)
-    ET->>Storage: save_event(TimelineEvent)
-
     EB->>CA: notify(notification, NotificationPayload)
 
     Note over CA: Анализ: все notifications,<br/>история диалога, другие события
@@ -331,7 +300,6 @@ sequenceDiagram
     participant CA as ContextAgent
     participant DA as DialogueAgent
     participant User as Пользователь
-    participant ET as EventTracker
 
     Note over CA: Решение: доставить
 
@@ -339,9 +307,6 @@ sequenceDiagram
     Note over DA: НЕ сохраняет в Storage.messages
 
     DA-->>User: notification_message
-
-    Note over ET: Для VS UI
-    ET->>Storage: save_event(notification_sent)
 ```
 
 **Фаза 3: Ответ пользователя**
@@ -352,15 +317,11 @@ sequenceDiagram
     participant User as Пользователь
     participant DA as DialogueAgent
     participant Storage as Storage
-    participant ET as EventTracker
 
     User->>DA: invoke(user_id, response)
 
     Note over DA: Сохраняет с metadata о предыдущем уведомлении
     DA->>Storage: save_message(user_id, response, metadata={got_notification: ...})
-
-    Note over ET: Для VS UI
-    ET->>Storage: save_event(message_received)
 ```
 
 ### 5.4. Логика ContextAgent
@@ -397,8 +358,7 @@ uvicorn main:app --reload
 3. Инициализация Event Bus
 4. Регистрация Processing Agents
 5. Запуск ContextAgent + DialogueAgent
-6. Запуск Event Tracker
-7. VS UI доступен через polling API
+6. Запуск Event Tracker (для VS UI)
 ```
 
 **До запуска ничего делать не нужно.**
@@ -428,7 +388,6 @@ sequenceDiagram
     participant Bootstrap as Bootstrap
     participant PL as ProcessingLayer
     participant PA as ProcessingAgent
-    participant Storage as Storage
 
     loop Для каждого агента
         Bootstrap->>PL: register(agent)
@@ -447,31 +406,13 @@ sequenceDiagram
     participant CA as ContextAgent
     participant DA as DialogueAgent
     participant EB as Event Bus
-    participant Storage as Storage
 
     Bootstrap->>CA: start(event_bus, dialogue_agent)
     CA->>EB: subscribe(notification, handler)
     CA-->>Bootstrap: ready
 
     Bootstrap->>DA: start(storage, llm_provider)
-    DA->>Storage: get_active_dialogues() ~для recovery~
     DA-->>Bootstrap: ready
-```
-
-**Фаза 4: Запуск VS UI компонентов**
-
-```mermaid
-sequenceDiagram
-    autonumber
-    participant Bootstrap as Bootstrap
-    participant ET as EventTracker
-    participant EB as Event Bus
-
-    Bootstrap->>ET: start(event_bus, storage)
-    ET->>EB: subscribe(all_topics, tracker_handler)
-    ET-->>Bootstrap: ready
-
-    Note over Bootstrap: VS UI доступен через /api/timeline
 ```
 
 ### 6.3. Порядок зависимостей
@@ -484,7 +425,6 @@ sequenceDiagram
 | 4 | ContextAgent | Event Bus, DialogueAgent (ref) |
 | 5 | DialogueAgent | Storage, LLM Provider |
 | 6 | Event Tracker | Event Bus, Storage |
-| 7 | VS UI (API) | Storage |
 
 ---
 
@@ -498,25 +438,8 @@ sequenceDiagram
 **Ожидаемый результат:**
 - SIM генерирует сообщения от виртуальных пользователей
 - Система обрабатывает как реальные сообщения
-- Все события видны в VS UI
 
 ### 7.2. Диаграмма
-
-**Фаза 1: Запуск SIM**
-
-```mermaid
-sequenceDiagram
-    autonumber
-    participant VS as VS UI Controls
-    participant SIM as SIM Engine
-    participant ET as EventTracker
-
-    VS->>SIM: start()
-    SIM->>ET: track(sim_start)
-    ET->>Storage: save_event(TimelineEvent)
-```
-
-**Фаза 2: Генерация и обработка сообщений**
 
 ```mermaid
 sequenceDiagram
@@ -526,35 +449,22 @@ sequenceDiagram
     participant Profiles as SIM Profiles
     participant DA as DialogueAgent
     participant Storage as Storage
-    participant ET as EventTracker
 
-    VS->>SIM: next_event()
-    SIM->>Profiles: get_next_event()
-    Profiles-->>SIM: (profile, scenario_trigger)
+    VS->>SIM: start()
 
-    SIM->>SIM: profile + trigger → message
-    Note over SIM: Генерация:<br/>≥2-3 факта, эмоциональная окраска
+    loop Генерация событий
+        SIM->>Profiles: get_next_event()
+        Profiles-->>SIM: (profile, scenario_trigger)
 
-    SIM->>DA: invoke(profile.user_id, message)
-    DA->>Storage: save_message(user_id, message)
-    DA-->>SIM: response
+        SIM->>SIM: profile + trigger → message
+        Note over SIM: Генерация:<br/>≥2-3 факта, эмоциональная окраска
 
-    Note over ET: Для VS UI
-    ET->>Storage: save_events(message_sent, message_received)
-```
-
-**Фаза 3: Остановка SIM**
-
-```mermaid
-sequenceDiagram
-    autonumber
-    participant VS as VS UI Controls
-    participant SIM as SIM Engine
-    participant ET as EventTracker
+        SIM->>DA: invoke(profile.user_id, message)
+        DA->>Storage: save_message(user_id, message)
+        DA-->>SIM: response
+    end
 
     VS->>SIM: stop()
-    SIM->>ET: track(sim_stop)
-    ET->>Storage: save_event(TimelineEvent)
     SIM-->>VS: stopped
 ```
 
@@ -595,12 +505,70 @@ sequenceDiagram
 
 | Сценарий | Вход | Выход | Статус |
 |----------|------|-------|--------|
-| A | user_id + message | Ответ + события в Event Bus + TimelineEvents | MVP |
-| B | Таймаут диалога | DialogueFragment в raw + TimelineEvents | MVP |
-| C | Notification от агента | Доставка пользователю (скрытый поток) + TimelineEvents | MVP |
+| A | user_id + message | Ответ + события в Event Bus | MVP |
+| B | Таймаут диалога | DialogueFragment в raw | MVP |
+| C | Notification от агента | Доставка пользователю (скрытый поток) | MVP |
 | D | Команда запуска | Система готова | MVP |
-| E | Start SIM | Симуляция сообщений + TimelineEvents | MVP |
+| E | Start SIM | Симуляция сообщений | MVP |
 | Clear | Перед запуском | Storage очищен | MVP |
+
+---
+
+## 10. Координация с VS UI
+
+### 10.1. Принцип разделения
+
+**Backend (этот документ):** Описывает логику обработки сообщений и взаимодействия компонентов.
+
+**VS UI (visualization_architecture.md):** Описывает, как фронтенд получает данные для визуализации.
+
+**Связь:** EventTracker — единственный компонент, который связывает backend логику с VS UI.
+
+### 10.2. Event Tracker
+
+**Назначение:** Фиксирует события для VS UI в Storage.events
+
+**Подписка:** На все топики Event Bus
+
+**Поток данных:**
+```
+Любой компонент → EventBus → EventTracker → Storage.events
+VS UI (polling) → GET /api/timeline → Storage.events → Timeline
+```
+
+**События для трекинга:**
+- message_received / message_sent
+- dialogue_fragment_published
+- agent_activity_start / agent_result
+- notification_generated / notification_sent
+- sim_start / sim_stop
+
+### 10.3. Сценарий: От сообщения к Timeline
+
+```mermaid
+sequenceDiagram
+    autonumber
+    participant User as Пользователь
+    participant DA as DialogueAgent
+    participant EB as Event Bus
+    participant ET as EventTracker
+    participant Storage as Storage
+    participant VS as VS UI (Browser)
+
+    User->>DA: invoke(user_id, message)
+    DA->>Storage: save_message(user_id, message)
+    DA->>EB: publish(raw, ...) ~если нужно~
+
+    EB->>ET: on_event(message_received)
+    ET->>Storage: save_event(TimelineEvent)
+
+    Note over VS: Polling (каждую 1 сек)
+    VS->>Storage: GET /api/timeline?since=...
+    Storage-->>VS: TimelineEvent[]
+    Note over VS: Отображение на Timeline
+```
+
+**Детальная архитектура VS UI:** См. `00_docs/architecture/visualization_architecture.md`
 
 ---
 
