@@ -7,6 +7,7 @@
 **Связанные документы:**
 - `00_docs/architecture/overview.md` — общая архитектура системы
 - `00_docs/architecture/visualization_architecture.md` — архитектура VS UI
+- `00_docs/architecture/data_model.md` — модель данных
 
 ---
 
@@ -248,35 +249,35 @@ sequenceDiagram
 
 **Ожидаемый результат:**
 - Пользователь получает уведомление через DialogueAgent
-- Служебные сообщения НЕ сохраняются в Storage.messages
-- Ответ пользователя сохраняется с metadata о полученном уведомлении
+- Скрытые инструкции сохраняются в Storage.messages
+- Все сообщения хранятся как есть, фильтрация — зона ответственности LLM-интерфейса
 
 ### 5.2. Логика скрытых сообщений
 
-**Проблема:** Служебные инструкции в истории искажают диалог
-
-**Решение:** Системные уведомления не сохраняются в истории диалога
+**Скрытые инструкции** — служебные сообщения для управления диалогом, сохраняются в Storage наравне с остальными.
 
 ```
 Storage (фактически):
 [ai:native]
 [user:native]
 [ai:native]
-[user: metadata (got notification X, responded): response]
+[user:hidden instruction]  ← сохраняется как есть
+[ai:notification]          ← сохраняется как есть
+[user:response]            ← сохраняется как есть
 ```
 
-**Скрытый поток:**
+**Поток:**
 ```
-ContextAgent → DialogueAgent(system_message=True)
-DialogueAgent → НЕ сохраняет в Storage
+ContextAgent → DialogueAgent
+DialogueAgent → Storage (save_message с role='user', content='[hidden instruction] ...')
+DialogueAgent → LLM (с включением инструкции в контекст)
+LLM → response
 DialogueAgent → User (notification)
 User → DialogueAgent (response)
-DialogueAgent → Storage (сохраняет с metadata)
+DialogueAgent → Storage (save_message)
 ```
 
 ### 5.3. Диаграмма
-
-**Фаза 1: Публикация уведомления и анализ ContextAgent**
 
 ```mermaid
 sequenceDiagram
@@ -284,44 +285,22 @@ sequenceDiagram
     participant PA as ProcessingAgent
     participant EB as Event Bus
     participant CA as ContextAgent
+    participant DA as DialogueAgent
+    participant Storage as Storage
+    participant User as Пользователь
 
     PA->>EB: publish(notification, NotificationPayload)
     EB->>CA: notify(notification, NotificationPayload)
 
     Note over CA: Анализ: все notifications,<br/>история диалога, другие события
     CA->>CA: Решение: доставлять ли, как формулировать
-```
 
-**Фаза 2: Доставка пользователю (скрытый поток)**
+    CA->>DA: invoke(user_id, notification_message)
+    DA->>Storage: save_message(user_id, "[hidden instruction] ...")
+    Note over DA: LLM обрабатывает с инструкцией
 
-```mermaid
-sequenceDiagram
-    autonumber
-    participant CA as ContextAgent
-    participant DA as DialogueAgent
-    participant User as Пользователь
-
-    Note over CA: Решение: доставить
-
-    CA->>DA: invoke(user_id, notification_message, system_message=True)
-    Note over DA: НЕ сохраняет в Storage.messages
-
+    DA->>DA: Генерация ответа через LLM
     DA-->>User: notification_message
-```
-
-**Фаза 3: Ответ пользователя**
-
-```mermaid
-sequenceDiagram
-    autonumber
-    participant User as Пользователь
-    participant DA as DialogueAgent
-    participant Storage as Storage
-
-    User->>DA: invoke(user_id, response)
-
-    Note over DA: Сохраняет с metadata о предыдущем уведомлении
-    DA->>Storage: save_message(user_id, response, metadata={got_notification: ...})
 ```
 
 ### 5.4. Логика ContextAgent
@@ -337,7 +316,7 @@ sequenceDiagram
 - Когда доставить (немедленно / отложенно)
 
 **Выход:**
-- `invoke(user_id, message, system_message=True)` — доставка
+- `invoke(user_id, message)` — доставка (сохраняет скрытую инструкцию)
 - ignore — пропуск
 
 ---
