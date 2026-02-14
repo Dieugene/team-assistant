@@ -7,6 +7,11 @@
 > Уровень детализации: ответственности, входы/выходы, зависимости,
 > паттерны коммуникации. Сигнатуры интерфейсов и структуры данных —
 > в отдельных документах.
+>
+> **Границы документа:** здесь зафиксирован архитектурный скелет —
+> компоненты, без которых система не работает. Реализационные компоненты
+> (фабрики, адаптеры, конкретные ProcessingAgents и т.д.) появляются
+> на этапе детальной спецификации и не требуют описания на этом уровне.
 
 ---
 
@@ -41,12 +46,14 @@ graph TB
             Buffer["DialogueBuffer"]
         end
 
+        OutputRouter
+
         EventBus
 
         subgraph ProcessingLayer
             PA1["ProcessingAgent 1"]
             PA2["ProcessingAgent 2"]
-            CA["ContextAgent"]
+            PA3["..."]
         end
 
         Tracker
@@ -56,10 +63,16 @@ graph TB
 
     DialogueAgent -->|"publish(input)"| EventBus
     EventBus -->|"subscribe"| ProcessingLayer
-    ProcessingLayer -->|"publish(processed, output)"| EventBus
-    EventBus -->|"subscribe(output)"| DialogueAgent
+    ProcessingLayer -->|"publish(processed)"| EventBus
+    ProcessingLayer -->|"publish(output)"| EventBus
+    EventBus -->|"subscribe(output)"| OutputRouter
+    OutputRouter -->|"доставка"| DialogueAgent
+
     EventBus -->|"subscribe(all)"| Tracker
+    DialogueAgent -.->|"track()"| Tracker
+    ProcessingLayer -.->|"track()"| Tracker
     Tracker -->|"write"| Storage
+
     DialogueAgent -->|"read/write"| Storage
     ProcessingLayer -->|"read/write"| Storage
     DialogueAgent --> LLMProvider
@@ -68,25 +81,21 @@ graph TB
 
 ### Компоненты Core и их ранг
 
-Не все понятия из глоссария являются компонентами одного уровня.
-Ниже — явная иерархия:
-
-**Компоненты верхнего уровня** (самостоятельные единицы внутри Core):
+**Компоненты верхнего уровня** (архитектурный скелет):
 - DialogueAgent
 - EventBus
 - ProcessingLayer
+- OutputRouter
 - Tracker
 - Storage
 - LLMProvider
 
-**Вложенные компоненты** (существуют внутри компонента верхнего уровня):
+**Вложенные** (существуют внутри компонента верхнего уровня):
 - DialogueBuffer — внутри DialogueAgent
 - ProcessingAgent (конкретные экземпляры) — внутри ProcessingLayer
-- ContextAgent — конкретный ProcessingAgent внутри ProcessingLayer
 
-**Роли** (ответственность, не обязательно отдельный компонент):
-- OutputRouter — роль, которую может выполнять ContextAgent,
-  отдельный ProcessingAgent или выделенный компонент
+Конкретные ProcessingAgents (ContextAgent и другие) определяются
+на уровне детальной спецификации, а не архитектурного скелета.
 
 ---
 
@@ -97,11 +106,11 @@ graph TB
 **Ответственность:**
 Управление всеми Dialogues. Приём Messages от Users, генерация
 ответов через LLMProvider, буферизация и публикация в EventBus.
-Доставка output-содержимого пользователям.
+Доставка output-содержимого пользователям (получает от OutputRouter).
 
 **Входы:**
 - Messages от Users (внешний вход)
-- BusMessages с topic: output от EventBus (для доставки пользователям)
+- Готовый к доставке output от OutputRouter
 
 **Выходы:**
 - Messages для Users (внешний выход)
@@ -109,8 +118,9 @@ graph TB
 
 **Зависимости:**
 - LLMProvider — для генерации ответов
-- EventBus — для публикации input и получения output
+- EventBus — для публикации input
 - Storage — для персистентности DialogueState
+- Tracker — для явной записи TraceEvents
 
 **Внутренняя структура:**
 Содержит DialogueBuffer для каждого активного Dialogue.
@@ -157,6 +167,7 @@ BusMessage в Topic, EventBus вызывает callback'и всех подпис
 - EventBus — передаёт агентам для подписки и публикации
 - Storage — передаёт агентам для доступа к AgentState
 - LLMProvider — передаёт агентам при необходимости
+- Tracker — передаёт агентам для явной записи TraceEvents
 
 **Внутренняя структура:**
 Содержит набор ProcessingAgents. Каждый агент:
@@ -170,21 +181,29 @@ BusMessage в Topic, EventBus вызывает callback'и всех подпис
 
 ---
 
-### ContextAgent (конкретный ProcessingAgent)
+### OutputRouter
 
 **Ответственность:**
-Формирование и поддержание общей картины по Team.
-Потенциально — роль OutputRouter (решение отложено).
+Предобработка output-потока перед доставкой пользователям.
+Находится между EventBus (topic: output) и DialogueAgent.
 
 **Входы:**
-- BusMessages с topic: input и processed (через EventBus)
+- BusMessages с topic: output (через подписку на EventBus)
 
 **Выходы:**
-- BusMessages с topic: processed (обновления контекста)
-- BusMessages с topic: output (если выполняет роль OutputRouter)
+- Готовый к доставке output → DialogueAgent
 
 **Зависимости:**
-- EventBus, Storage, LLMProvider (через ProcessingLayer)
+- EventBus — для получения output
+- DialogueAgent — для доставки пользователям
+- Storage — при необходимости (контекст для принятия решений)
+- LLMProvider — при необходимости (переформулирование)
+
+**Функции:**
+- Адресация (кому доставить, если output не имеет явного адресата)
+- Агрегация (объединение связанных output-сообщений)
+- Дедупликация (предотвращение информационного шума)
+- Переформулирование (адаптация под контекст получателя)
 
 ---
 
@@ -192,10 +211,17 @@ BusMessage в Topic, EventBus вызывает callback'и всех подпис
 
 **Ответственность:**
 Создание TraceEvents на основе всей активности системы.
-Единственный мост между основной логикой и слоем наблюдаемости.
+Мост между основной логикой и слоем наблюдаемости.
 
-**Входы:**
-- Все BusMessages (подписан на все Topics в EventBus)
+**Два канала получения данных:**
+
+1. **Подписка на EventBus** (пассивный) — автоматически фиксирует
+   все BusMessages, проходящие через шину
+2. **Прямые вызовы из компонентов** (активный) — компоненты явно
+   вызывают Tracker для записи событий, не проходящих через EventBus
+   (внутренние состояния, этапы обработки, диагностика).
+   По аналогии с Amplitude SDK: в коде в нужных точках размещается
+   вызов, фиксирующий событие и связанные с ним данные.
 
 **Выходы:**
 - TraceEvents в Storage
@@ -237,7 +263,7 @@ Tracker не фильтрует. Он записывает всё.
 модели и формата взаимодействия.
 
 **Входы:**
-- Запросы от DialogueAgent и ProcessingAgents
+- Запросы от DialogueAgent, ProcessingAgents, OutputRouter
 
 **Выходы:**
 - Ответы от LLM
@@ -255,25 +281,29 @@ sequenceDiagram
     participant DA as DialogueAgent
     participant EB as EventBus
     participant PL as ProcessingLayer
+    participant OR as OutputRouter
     participant TR as Tracker
     participant ST as Storage
     participant VSUI as VS UI
 
     User ->> DA: Message
     DA ->> EB: BusMessage(input)
+    DA -->> TR: track(dialogue_received)
     EB ->> PL: callback(input)
     EB ->> TR: callback(input)
     TR ->> ST: write TraceEvent
 
+    PL -->> TR: track(processing_step)
     PL ->> EB: BusMessage(processed)
     EB ->> TR: callback(processed)
     TR ->> ST: write TraceEvent
 
     PL ->> EB: BusMessage(output)
-    EB ->> DA: callback(output)
+    EB ->> OR: callback(output)
     EB ->> TR: callback(output)
     TR ->> ST: write TraceEvent
 
+    OR ->> DA: готовый output
     DA ->> User: Message (доставка)
 
     VSUI ->> ST: polling API (read TraceEvents)
@@ -282,10 +312,6 @@ sequenceDiagram
 ---
 
 ## 5. Открытые вопросы
-
-- **OutputRouter:** определён как роль, но не как компонент.
-  Реализация (ContextAgent, отдельный агент, или выделенный компонент)
-  определится по результатам практики.
 
 - **Персистентность EventBus:** нужно ли сохранять BusMessages
   в Storage для replay? Или достаточно TraceEvents? Отложено.
