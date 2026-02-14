@@ -226,6 +226,11 @@ BusMessage в Topic, EventBus вызывает callback'и всех подпис
 **Выходы:**
 - TraceEvents в Storage
 
+**Полнота записи:**
+Tracker вкладывает в каждый TraceEvent полные данные (текст сообщения,
+SGR-трейс, содержимое output и т.д.), а не только ссылки.
+TraceEvents — единственный источник данных для VS UI.
+
 **Зависимости:**
 - EventBus — для подписки на все Topics
 - Storage — для записи TraceEvents
