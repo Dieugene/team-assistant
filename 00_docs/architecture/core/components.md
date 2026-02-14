@@ -14,21 +14,14 @@
 
 Система состоит из трёх независимо развёртываемых частей:
 
-```
-┌─────────────────────────────────────────────┐
-│                   Core                       │
-│  (бэкенд: диалоги, обработка, хранение)     │
-└──────────────────┬──────────────────────────┘
-                   │ polling API
-┌──────────────────┴──────────────────────────┐
-│                  VS UI                       │
-│  (фронтенд: визуализация TraceEvents)       │
-└─────────────────────────────────────────────┘
+```mermaid
+graph TB
+    Core["Core<br/><i>бэкенд: диалоги, обработка, хранение</i>"]
+    VSUI["VS UI<br/><i>фронтенд: визуализация TraceEvents</i>"]
+    SIM["SIM<br/><i>генерация тестовых данных</i>"]
 
-┌─────────────────────────────────────────────┐
-│                   SIM                        │
-│  (генерация тестовых данных)                 │
-└─────────────────────────────────────────────┘
+    VSUI -->|polling API| Core
+    SIM -->|внешний клиент| Core
 ```
 
 - **Core** — основная логика системы
@@ -41,30 +34,36 @@ VS UI и SIM не зависят друг от друга. Оба зависят
 
 ## 2. Внутренняя структура Core
 
-```
-┌─────────────────────────────────────────────────────────┐
-│                         Core                             │
-│                                                          │
-│  ┌──────────────┐     ┌────────────┐                     │
-│  │DialogueAgent │────▶│  EventBus   │◀───┐               │
-│  │ ┌──────────┐ │     └─────┬──────┘    │               │
-│  │ │  Buffer  │ │           │           │               │
-│  │ └──────────┘ │     ┌─────▼──────┐    │               │
-│  └──────┬───────┘     │ Processing │    │               │
-│         │             │   Layer    │────┘               │
-│         │             │ ┌────────┐ │                     │
-│         │             │ │Agent 1 │ │                     │
-│         │             │ │Agent 2 │ │                     │
-│         │             │ │  ...   │ │                     │
-│         │             │ └────────┘ │                     │
-│         │             └────────────┘                     │
-│         │                                                │
-│         ▼                                                │
-│  ┌─────────────┐   ┌─────────┐   ┌──────────────┐      │
-│  │ LLMProvider │   │ Tracker │   │   Storage     │      │
-│  └─────────────┘   └─────────┘   └──────────────┘      │
-│                                                          │
-└──────────────────────────────────────────────────────────┘
+```mermaid
+graph TB
+    subgraph Core
+        subgraph DialogueAgent
+            Buffer["DialogueBuffer"]
+        end
+
+        EventBus
+
+        subgraph ProcessingLayer
+            PA1["ProcessingAgent 1"]
+            PA2["ProcessingAgent 2"]
+            CA["ContextAgent"]
+        end
+
+        Tracker
+        Storage
+        LLMProvider
+    end
+
+    DialogueAgent -->|"publish(input)"| EventBus
+    EventBus -->|"subscribe"| ProcessingLayer
+    ProcessingLayer -->|"publish(processed, output)"| EventBus
+    EventBus -->|"subscribe(output)"| DialogueAgent
+    EventBus -->|"subscribe(all)"| Tracker
+    Tracker -->|"write"| Storage
+    DialogueAgent -->|"read/write"| Storage
+    ProcessingLayer -->|"read/write"| Storage
+    DialogueAgent --> LLMProvider
+    ProcessingLayer --> LLMProvider
 ```
 
 ### Компоненты Core и их ранг
@@ -250,25 +249,34 @@ Tracker не фильтрует. Он записывает всё.
 
 ## 4. Потоки данных — сводка
 
-```
-User ──Message──▶ DialogueAgent ──BusMessage(input)──▶ EventBus
-                                                          │
-                       ┌──────────────────────────────────┤
-                       ▼                                  ▼
-                 ProcessingLayer                       Tracker
-                 (все подписчики                    (все Topics)
-                  соотв. Topics)                        │
-                       │                                ▼
-                       ├── BusMessage(processed) ──▶ EventBus
-                       │                                │
-                       └── BusMessage(output) ────▶ EventBus
-                                                        │
-                                                        ▼
-                                                  DialogueAgent
-                                                  (доставка User)
+```mermaid
+sequenceDiagram
+    actor User
+    participant DA as DialogueAgent
+    participant EB as EventBus
+    participant PL as ProcessingLayer
+    participant TR as Tracker
+    participant ST as Storage
+    participant VSUI as VS UI
 
-Storage ◀── запись ── (DialogueAgent, ProcessingAgents, Tracker)
-Storage ──── чтение ──▶ VS UI (polling API)
+    User ->> DA: Message
+    DA ->> EB: BusMessage(input)
+    EB ->> PL: callback(input)
+    EB ->> TR: callback(input)
+    TR ->> ST: write TraceEvent
+
+    PL ->> EB: BusMessage(processed)
+    EB ->> TR: callback(processed)
+    TR ->> ST: write TraceEvent
+
+    PL ->> EB: BusMessage(output)
+    EB ->> DA: callback(output)
+    EB ->> TR: callback(output)
+    TR ->> ST: write TraceEvent
+
+    DA ->> User: Message (доставка)
+
+    VSUI ->> ST: polling API (read TraceEvents)
 ```
 
 ---
