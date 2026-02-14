@@ -67,7 +67,7 @@ erDiagram
 Одна реплика внутри Dialogue.
 
 **Содержит:** роль (user, assistant, system), текстовое содержимое,
-опциональные Attachments, временна́я метка, порядковая позиция в Dialogue.
+опциональные Attachments, временна́я метка.
 
 **Связи:** принадлежит одному Dialogue, может иметь Attachments.
 
@@ -88,8 +88,12 @@ erDiagram
 Персистентное состояние Dialogue, достаточное для восстановления
 DialogueBuffer при перезапуске системы.
 
-**Содержит:** ссылка на User/Dialogue, информация о том,
-какие Messages уже опубликованы в EventBus (граница буфера).
+**Содержит:** ссылка на User/Dialogue, граница публикации —
+временна́я метка последнего Message, опубликованного в EventBus.
+Всё, что в Dialogue после этой метки — ещё не опубликовано.
+
+DialogueBuffer — не отдельная хранимая структура, а вычисляемый
+подмассив Messages: от границы публикации до последнего Message.
 
 **Инвариант:** один User — один DialogueState.
 
@@ -114,8 +118,8 @@ SGR-трейсы (логи рассуждений) в формате JSON.
 **Содержит:** Topic (input / processed / output),
 типизированный Payload, метаданные (id, timestamp, source).
 
-**Транзиентная сущность:** существует в памяти,
-потребляется подписчиками и не сохраняется.
+**Персистентность:** BusMessages сохраняются в Storage через EventBus.
+Возможен TTL для ограничения объёма хранения.
 
 **Payload варьируется по Topic:**
 - input — фрагмент диалога (Messages из буфера)
@@ -150,8 +154,8 @@ SGR-трейсы (логи рассуждений) в формате JSON.
 | DialogueState | Storage | Для восстановления буфера |
 | AgentState | Storage | Для восстановления агентов |
 | TraceEvent | Storage | Append-only, для VS UI |
-| BusMessage | В памяти | Не сохраняется; потребляется и исчезает |
-| DialogueBuffer | В памяти | Восстанавливается из Messages + DialogueState |
+| BusMessage | Storage | Персистентен через EventBus; возможен TTL |
+| DialogueBuffer | Вычисляемый | Подмассив Messages, определяемый границей из DialogueState |
 | Подписки EventBus | В памяти | Пересоздаются при bootstrap |
 
 ---
@@ -163,15 +167,11 @@ SGR-трейсы (логи рассуждений) в формате JSON.
 - Messages внутри Dialogue упорядочены
 - AgentState изолирован: агенты не разделяют состояние
 - TraceEvents — append-only, самодостаточны (полные данные, не ссылки)
-- BusMessages транзиентны — после потребления подписчиками не существуют
+- BusMessages персистентны через EventBus → Storage (возможен TTL)
 
 ---
 
 ## 5. Открытые вопросы
-
-- **Персистентность BusMessages.** Нужен ли replay BusMessages
-  для восстановления после сбоя? Или достаточно DialogueState + AgentState?
-  (Вопрос поднят в components.md, раздел 5.)
 
 - **Ротация TraceEvents.** TraceEvents содержат полные данные,
   объём растёт. Нужна ли ротация или временно́е окно для MVP?
