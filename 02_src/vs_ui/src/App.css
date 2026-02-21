@@ -1,0 +1,46 @@
+/** App styles. */
+
+.app {
+  min-height: 100vh;
+  background-color: #f9f9f9;
+}
+
+.app-header {
+  background-color: #fff;
+  border-bottom: 1px solid #ddd;
+  padding: 20px;
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  box-shadow: 0 2px 4px rgba(0, 0, 0, 0.05);
+}
+
+.app-header h1 {
+  margin: 0;
+  font-size: 28px;
+  color: #333;
+}
+
+.app-header .controls {
+  display: flex;
+  gap: 12px;
+}
+
+.app-header button {
+  padding: 10px 20px;
+  font-size: 14px;
+  border: 1px solid #ccc;
+  border-radius: 6px;
+  background-color: #fff;
+  cursor: pointer;
+  transition: all 0.2s;
+}
+
+.app-header button:hover {
+  background-color: #f0f0f0;
+  border-color: #999;
+}
+
+.app-main {
+  padding: 20px 0;
+}

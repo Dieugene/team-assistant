@@ -6,6 +6,33 @@
 .old/
 *.bak
 
+# Python
+venv/
+.venv/
+env/
+__pycache__/
+*.pyc
+*.pyo
+
+# Node.js
+node_modules/
+
+# Environment (секреты)
+.env
+**/.env
+
+# SQLite databases
+*.db
+*.sqlite
+*.sqlite3
+
+# Logs
+*.log
+
+# Build artifacts
+dist/
+build/
+
 # Git worktrees (project-specific work)
 .worktrees/
 

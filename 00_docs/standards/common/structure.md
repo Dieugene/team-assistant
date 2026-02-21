@@ -7,7 +7,6 @@ project/
 ├── .agents/                  # Описания ролей агентов
 │   ├── architect.md
 │   ├── tech-lead.md
-│   ├── analyst.md
 │   ├── developer.md
 │   ├── reviewer.md
 │   └── history/              # Сохраненные истории диалогов
@@ -23,7 +22,6 @@ project/
 │   │   ├── common/         # Общие для всех ролей
 │   │   ├── architect/      # Специфичные для Architect
 │   │   ├── tech-lead/      # Специфичные для Tech Lead
-│   │   ├── analyst/        # Специфичные для Analyst
 │   │   ├── developer/      # Специфичные для Developer
 │   │   └── reviewer/       # Специфичные для Reviewer
 │   ├── specs/              # Спецификации
@@ -52,12 +50,10 @@ project/
 
 ```
 01_tasks/003_feature_name/
-├── task_brief_01.md          # Постановка от Architect
-├── analysis_01.md            # Технический план от Analyst
+├── task_brief_01.md          # Постановка от Tech Lead
 ├── implementation_01.md      # Отчет Developer
-├── review_01.md             # Результаты проверки Reviewer
-├── _analyst_handoff.md      # Передача дел (опционально)
-└── _questions_architect.md  # Вопросы для эскалации (опционально)
+├── review_01.md              # Результаты проверки Reviewer
+└── _questions_tech_lead.md   # Вопросы для эскалации (опционально)
 ```
 
 **Правило:** Все основные файлы задачи нумеруются с `_01`, затем `_02` и т.д. при итерациях.
@@ -65,7 +61,7 @@ project/
 **Служебные файлы** (начинаются с `_`):
 - Временные/передаточные
 - Могут быть удалены после завершения
-- Примеры: `_analyst_handoff.md`, `_questions_architect.md`, `_draft_notes.md`
+- Примеры: `_questions_tech_lead.md`, `_developer_handoff.md`, `_draft_notes.md`
 
 ## Архитектурные решения
 
@@ -139,3 +135,46 @@ project/
 **Правило:** Имя директории worktree = имя ветки (например `.worktrees/experiment/` на ветке `experiment`).
 
 **Управление:** Architect через `.claude/skills/worktree/SKILL.md`
+
+## Размещение тестов
+
+**Правило:** Папки в корне проекта — с нумерацией. Папки внутри 02_src/ — можно без.
+
+**Вариант A: Нумерованная папка в корне**
+```
+project/
+├── 05_tests/              # ✅ С нумерацией
+│   ├── unit/
+│   ├── integration/
+│   └── htmlcov/           # Метрики внутри
+```
+
+**Вариант B: Внутри 02_src/**
+```
+project/
+├── 02_src/
+│   ├── my_module/
+│   │   └── tests/         # ✅ Можно без нумерации
+│   └── tests/             # ✅ Общие тесты
+```
+
+**Запрещено:**
+- ❌ `tests/` в корне без нумерации
+- ❌ `htmlcov/` в корне
+- ❌ `.coverage` в корне
+
+## Работа с .gitignore
+
+**.gitignore — для временных/сгенерированных файлов, не для плохой структуры.**
+
+**Добавляй:**
+- `__pycache__/`, `*.pyc`
+- `.env` (секреты)
+- `dist/`, `build/`
+
+**НЕ добавляй (перемести или удали):**
+- Конфиги в неправильном месте → перемести в 02_src/ или pyproject.toml
+- Метрики тестов → перемести в 05_tests/
+- Папки без нумерации → переименуй с нумерацией
+
+**Принцип:** Если файл мешает — сначала подумай куда переместить, потом думай про .gitignore.
